@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bitcoin_metadata>
+  <transaction txid="c4d5e6789012345678901234567890abcdef1234567890abcdef1234567" timestamp="2025-08-11T02:45:00">
+    <src_ip>198.18.0.50</src_ip>
+    <src_port>8333</src_port>
+    <dst_ip>185.220.101.42</dst_ip>
+    <dst_port>8333</dst_port>
+    <input_addresses>bc1q7g8h9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z</input_addresses>
+    <output_addresses>1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa;bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh</output_addresses>
+    <amount_btc>9.75</amount_btc>
+    <fee_btc>0.004</fee_btc>
+    <script_type>P2PKH</script_type>
+  </transaction>
+  <transaction txid="d5e6789012345678901234567890abcdef1234567890abcdef12345678" timestamp="2025-08-11T03:10:00">
+    <src_ip>185.220.101.42</src_ip>
+    <src_port>8333</src_port>
+    <dst_ip>203.0.113.45</dst_ip>
+    <dst_port>8333</dst_port>
+    <input_addresses>1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa</input_addresses>
+    <output_addresses>3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy</output_addresses>
+    <amount_btc>9.5</amount_btc>
+    <fee_btc>0.002</fee_btc>
+    <script_type>P2SH</script_type>
+  </transaction>
+  <transaction txid="e6789012345678901234567890abcdef1234567890abcdef123456789" timestamp="2025-08-12T23:55:00">
+    <src_ip>203.0.113.45</src_ip>
+    <src_port>8333</src_port>
+    <dst_ip>198.51.100.77</dst_ip>
+    <dst_port>8333</dst_port>
+    <input_addresses>3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy;bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5ndq</input_addresses>
+    <output_addresses>bc1q9vza2e8x572ncvwljwpnyrs6zl0m5nvmq8q8kg</output_addresses>
+    <amount_btc>22.0</amount_btc>
+    <fee_btc>0.018</fee_btc>
+    <script_type>P2WPKH</script_type>
+  </transaction>
+</bitcoin_metadata>

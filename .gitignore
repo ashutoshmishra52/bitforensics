@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+data/bitforensics.db
+.DS_Store
+*.egg-info/
+/dist/
+node_modules/
+.env
+.env.*
+*.pem
+*.key
+credentials.json

@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BitForensics</title>
+  <link rel="stylesheet" href="/assets/style.css?v=7">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="logo">
+        <strong>BitForensics</strong>
+        <span>NTRO · SIH 2026 · PS 26146</span>
+      </div>
+      <nav id="main-nav">
+        <button type="button" class="nav active" data-tab="dashboard">Overview</button>
+        <button type="button" class="nav" data-tab="graph">Link Graph</button>
+        <button type="button" class="nav" data-tab="alerts">Alerts</button>
+        <button type="button" class="nav" data-tab="transactions">Transactions</button>
+        <button type="button" class="nav" data-tab="clusters">Clusters</button>
+        <button type="button" class="nav" data-tab="upload">Upload</button>
+      </nav>
+      <p class="status">Offline · Linux ready</p>
+    </aside>
+
+    <main>
+      <header class="header">
+        <div>
+          <h1 id="page-title">Overview</h1>
+          <p id="page-desc">Bitcoin transaction monitoring</p>
+        </div>
+        <div class="actions">
+          <button type="button" id="btn-run" class="btn btn-main">Run Analysis</button>
+          <button type="button" id="btn-refresh" class="btn">Refresh</button>
+          <button type="button" id="btn-clear" class="btn btn-danger">Clear Data</button>
+        </div>
+      </header>
+
+      <section id="tab-dashboard" class="page active">
+        <div id="stats" class="stats"></div>
+        <p id="hint" class="note" style="display:none"></p>
+        <div class="split">
+          <div class="box">
+            <h3>Top Alerts</h3>
+            <div id="dash-alerts"></div>
+          </div>
+          <div class="box">
+            <h3>Flagged Transactions</h3>
+            <div id="dash-anomalies"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-graph" class="page">
+        <div class="box">
+          <p class="note">Blue = IP, green = wallet, orange = transaction. Red border = flagged by the model.</p>
+          <div class="legend">
+            <span><i class="dot ip"></i> IP</span>
+            <span><i class="dot wallet"></i> Wallet</span>
+            <span><i class="dot tx"></i> Transaction</span>
+            <span><i class="dot flagged"></i> Flagged</span>
+          </div>
+          <canvas id="graph-canvas" width="900" height="500"></canvas>
+        </div>
+      </section>
+
+      <section id="tab-alerts" class="page">
+        <p class="note">Ranked alerts with full TXID, confidence score, reasons, and blockchain.com explorer links.</p>
+        <div id="alert-list"></div>
+      </section>
+
+      <section id="tab-transactions" class="page">
+        <p class="note">Shows the latest 100 rows. Total unique count is on Overview — there is no 1 lakh upload limit.</p>
+        <div class="box table-box">
+          <table>
+            <thead>
+              <tr>
+                <th>TXID</th><th>Time</th><th>Amount</th><th>Fee</th>
+                <th>Script</th><th>Src IP</th><th>Country</th><th>ASN</th>
+              </tr>
+            </thead>
+            <tbody id="tx-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="tab-clusters" class="page">
+        <div class="box">
+          <p class="note">Groups of related wallets or transactions with similar behavior (DBSCAN).</p>
+          <div id="cluster-list"></div>
+        </div>
+      </section>
+
+      <section id="tab-upload" class="page">
+        <div class="box upload-box">
+          <h3>Upload dataset</h3>
+          <p class="note">Supports CSV, JSON, and XML. No row cap. If two files share the same TXID, that transaction is stored once.</p>
+          <label class="drop" id="drop-zone">
+            <input type="file" id="file-input" accept=".csv,.json,.xml" hidden>
+            Choose a file or drag it here
+          </label>
+          <p id="upload-msg"></p>
+          <div class="clear-box">
+            <p class="note">Clear Data removes all stored transactions, alerts, and clusters so you can start fresh.</p>
+            <button type="button" id="btn-clear-upload" class="btn btn-danger">Clear all data</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast"></div>
+  <script src="/assets/graph.js?v=7"></script>
+  <script src="/assets/app.js?v=7"></script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+{
+  "transactions": [
+    {
+      "txid": "f1a2b3c4d5e6789012345678901234567890abcdef1234567890abcdef12",
+      "timestamp": "2025-08-09T00:30:00",
+      "src_ip": "185.220.101.42",
+      "src_port": 8333,
+      "dst_ip": "10.0.0.99",
+      "dst_port": 18333,
+      "input_addresses": ["bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh", "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5ndq"],
+      "output_addresses": ["3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"],
+      "amount_btc": 18.5,
+      "fee_btc": 0.003,
+      "script_type": "P2SH"
+    },
+    {
+      "txid": "a2b3c4d5e6789012345678901234567890abcdef1234567890abcdef1234",
+      "timestamp": "2025-08-09T01:15:00",
+      "src_ip": "10.0.0.99",
+      "src_port": 18333,
+      "dst_ip": "203.0.113.45",
+      "dst_port": 8333,
+      "input_addresses": ["3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"],
+      "output_addresses": [
+        "bc1q9vza2e8x572ncvwljwpnyrs6zl0m5nvmq8q8kg",
+        "bc1qcr8te4kr504gcwm9shfunny2eyzmgnm79nl7d",
+        "bc1q0d845w6r7q8x9y0z1a2b3c4d5e6f7g8h9j0k",
+        "bc1q1a2b3c4d5e6f7g8h9j0k1l2m3n4o5p6q7r8s9t",
+        "bc1q2b3c4d5e6f7g8h9j0k1l2m3n4o5p6q7r8s9t0u",
+        "bc1q3c4d5e6f7g8h9j0k1l2m3n4o5p6q7r8s9t0u1v",
+        "bc1q4d5e6f7g8h9j0k1l2m3n4o5p6q7r8s9t0u1v2w",
+        "bc1q5e6f7g8h9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x",
+        "bc1q6f7g8h9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y",
+        "bc1q7g8h9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z"
+      ],
+      "amount_btc": 18.2,
+      "fee_btc": 0.012,
+      "script_type": "P2SH"
+    },
+    {
+      "txid": "b3c4d5e6789012345678901234567890abcdef1234567890abcdef123456",
+      "timestamp": "2025-08-10T14:00:00",
+      "src_ip": "192.0.2.50",
+      "src_port": 8333,
+      "dst_ip": "192.0.2.51",
+      "dst_port": 18333,
+      "input_addresses": ["bc1q6f7g8h9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y"],
+      "output_addresses": ["bc1q7g8h9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z"],
+      "amount_btc": 0.45,
+      "fee_btc": 0.00005,
+      "script_type": "P2WPKH"
+    }
+  ]
+}

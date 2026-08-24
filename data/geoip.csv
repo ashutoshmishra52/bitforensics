@@ -1,0 +1,9 @@
+ip_prefix,country,asn,org
+185.220,DE,60729,Chaos Computer Club / Tor exit
+203.0.113,US,15169,Google LLC
+198.51.100,US,7922,Comcast Cable
+198.18,US,6453,TATA Communications
+192.0.2,US,3356,Level3 / Lumen
+172.16,LOCAL,0,Private network
+10.0,LOCAL,0,Private network
+192.168,LOCAL,0,Private LAN
