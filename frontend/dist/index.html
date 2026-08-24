@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BitForensics</title>
-  <link rel="stylesheet" href="/assets/style.css?v=7">
+  <link rel="stylesheet" href="/assets/style.css?v=15">
 </head>
 <body>
   <div class="layout">
@@ -21,7 +21,7 @@
         <button type="button" class="nav" data-tab="clusters">Clusters</button>
         <button type="button" class="nav" data-tab="upload">Upload</button>
       </nav>
-      <p class="status">Offline · Linux ready</p>
+      <p class="status" id="sidebar-status">Offline · Linux ready</p>
     </aside>
 
     <main>
@@ -40,15 +40,15 @@
       <section id="tab-dashboard" class="page active">
         <div id="stats" class="stats"></div>
         <p id="hint" class="note" style="display:none"></p>
-        <div class="split">
-          <div class="box">
-            <h3>Top Alerts</h3>
-            <div id="dash-alerts"></div>
-          </div>
-          <div class="box">
-            <h3>Flagged Transactions</h3>
-            <div id="dash-anomalies"></div>
-          </div>
+        <div class="box">
+          <h3>All alerts</h3>
+          <p class="note tight">Full ranked list from the last analysis — if the model flagged 600, all 600 stay here. Click a row for evidence.</p>
+          <div id="dash-alerts"></div>
+        </div>
+        <div class="box stack-box">
+          <h3>Highest-risk transactions</h3>
+          <p class="note tight">Every Isolation Forest outlier from this dump, same order as analysis.</p>
+          <div id="dash-anomalies"></div>
         </div>
       </section>
 
@@ -66,7 +66,7 @@
       </section>
 
       <section id="tab-alerts" class="page">
-        <p class="note">Ranked alerts with full TXID, confidence score, reasons, and blockchain.com explorer links.</p>
+        <p class="note">Complete alert list (aligned table). Click a row for TX evidence and 120-condition flags — not proof of a crime.</p>
         <div id="alert-list"></div>
       </section>
 
@@ -87,7 +87,7 @@
 
       <section id="tab-clusters" class="page">
         <div class="box">
-          <p class="note">Groups of related wallets or transactions with similar behavior (DBSCAN).</p>
+          <p class="note">MiniBatchKMeans groups wallets/txs with similar volume, fan-out, and linked IPs.</p>
           <div id="cluster-list"></div>
         </div>
       </section>
@@ -95,12 +95,23 @@
       <section id="tab-upload" class="page">
         <div class="box upload-box">
           <h3>Upload dataset</h3>
-          <p class="note">Supports CSV, JSON, and XML. No row cap. If two files share the same TXID, that transaction is stored once.</p>
+          <p class="note">Best demo file: <code>bitcoin_transactions_100k.csv</code> (amounts + fan-in/out). JSON 10k is a subset of the same txs. After upload, click <strong>Run Analysis</strong>.</p>
           <label class="drop" id="drop-zone">
             <input type="file" id="file-input" accept=".csv,.json,.xml" hidden>
-            Choose a file or drag it here
+            <span id="drop-label">Choose a file or drag it here</span>
           </label>
+          <div id="upload-progress" class="upload-progress" hidden>
+            <div class="upload-spinner"></div>
+            <p id="upload-progress-text">Uploading…</p>
+            <div class="upload-bar"><span id="upload-bar-fill"></span></div>
+          </div>
           <p id="upload-msg"></p>
+          <div class="geo-box">
+            <h3>GeoIP (open-source, then offline)</h3>
+            <p class="note">PS requires country/ASN from a downloadable GeoIP DB. Bundled prefix CSV works with no internet. Optional: download DB-IP Lite (CC BY 4.0) once, then stay air-gapped.</p>
+            <p id="geo-status" class="note">Checking GeoIP…</p>
+            <button type="button" id="btn-geo" class="btn">Download DB-IP Lite</button>
+          </div>
           <div class="clear-box">
             <p class="note">Clear Data removes all stored transactions, alerts, and clusters so you can start fresh.</p>
             <button type="button" id="btn-clear-upload" class="btn btn-danger">Clear all data</button>
@@ -111,7 +122,7 @@
   </div>
 
   <div id="toast" class="toast"></div>
-  <script src="/assets/graph.js?v=7"></script>
-  <script src="/assets/app.js?v=7"></script>
+  <script src="/assets/graph.js?v=15"></script>
+  <script src="/assets/app.js?v=15"></script>
 </body>
 </html>

@@ -12,11 +12,15 @@ from sqlalchemy.orm import Session
 from backend.correlation.engine import correlate_network_blockchain, store_transactions
 from backend.database.db import (
     Anomaly, Cluster, Correlation, Lead, Transaction,
-    deserialize_addresses, get_db, init_db,
+    deserialize_addresses, deserialize_floats, get_db, init_db,
 )
 from backend.graph.builder import build_graph
 from backend.ingest.parser import parse_csv, parse_json, parse_xml, parse_file
+from backend.geo.lookup import status as geo_status
+from backend.geo.download import download_geoip
 from backend.ml.analyzer import run_full_analysis
+from backend.ml.typology import classify_group, classify_tx, unique_title
+from backend.ml.red_flags import dataset_stats, explain_alert
 from backend.models.schemas import AnomalyResult, ClusterMember, CorrelatedEvent, DashboardStats, InvestigativeLead
 
 app = FastAPI(title="BitForensics", version="1.0")
@@ -45,7 +49,7 @@ def startup():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "mode": "offline"}
+    return {"status": "ok", "mode": "offline", "linux": True, "geo": geo_status()}
 
 
 @app.get("/api/stats", response_model=DashboardStats)
@@ -94,6 +98,8 @@ def transactions(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)
         "geo_country": t.geo_country, "asn": t.asn,
         "input_addresses": deserialize_addresses(t.input_addresses),
         "output_addresses": deserialize_addresses(t.output_addresses),
+        "input_amounts": deserialize_floats(t.input_amounts),
+        "output_amounts": deserialize_floats(t.output_amounts),
     } for t in rows]
 
 
@@ -102,67 +108,187 @@ def graph(db: Session = Depends(get_db)):
     return build_graph(db)
 
 
-@app.get("/api/alerts")
-def alerts(db: Session = Depends(get_db)):
-    """Ranked alert list with confidence, reasons, and full tx details."""
-    items = []
-    for r in db.query(Lead).order_by(Lead.score.desc()).all():
-        txids = json.loads(r.related_txids or "[]")
-        wallets = json.loads(r.related_addresses or "[]")
-        txs = []
-        for txid in txids:
-            t = db.query(Transaction).filter(Transaction.txid == txid).first()
-            detail = {
-                "txid": txid,
-                "explorer_url": f"https://www.blockchain.com/explorer/transactions/btc/{txid}",
-                "blockchain_url": f"https://www.blockchain.com/explorer/transactions/btc/{txid}",
-            }
-            if t:
-                # skip dust / zero-amount txs in alert cards
-                if (t.amount_btc or 0) <= 1e-8:
-                    continue
-                detail.update({
-                    "timestamp": t.timestamp.isoformat() if t.timestamp else None,
-                    "amount_btc": t.amount_btc,
-                    "fee_btc": t.fee_btc,
-                    "script_type": t.script_type,
-                    "src_ip": t.src_ip,
-                    "dst_ip": t.dst_ip,
-                    "src_port": t.src_port,
-                    "dst_port": t.dst_port,
-                    "geo_country": t.geo_country,
-                    "asn": t.asn,
-                    "input_addresses": deserialize_addresses(t.input_addresses),
-                    "output_addresses": deserialize_addresses(t.output_addresses),
-                })
-            txs.append(detail)
+def _alert_item(db, r, rank, stats):
+    txids = json.loads(r.related_txids or "[]")
+    wallets = json.loads(r.related_addresses or "[]")
+    txs = []
+    for txid in txids:
+        t = db.query(Transaction).filter(Transaction.txid == txid).first()
+        detail = {
+            "txid": txid,
+            "explorer_url": f"https://www.blockchain.com/explorer/transactions/btc/{txid}",
+            "blockchain_url": f"https://www.blockchain.com/explorer/transactions/btc/{txid}",
+        }
+        if t:
+            if (t.amount_btc or 0) <= 1e-8:
+                continue
+            detail.update({
+                "timestamp": t.timestamp.isoformat() if t.timestamp else None,
+                "amount_btc": t.amount_btc,
+                "fee_btc": t.fee_btc,
+                "script_type": t.script_type,
+                "src_ip": t.src_ip,
+                "dst_ip": t.dst_ip,
+                "src_port": t.src_port,
+                "dst_port": t.dst_port,
+                "geo_country": t.geo_country,
+                "asn": t.asn,
+                "input_addresses": deserialize_addresses(t.input_addresses),
+                "output_addresses": deserialize_addresses(t.output_addresses),
+                "input_count": t.input_count or 0,
+                "output_count": t.output_count or 0,
+            })
+        txs.append(detail)
 
-        # Drop cluster/anomaly alerts that only referenced zero-amount txs
-        if txids and not txs and not wallets:
-            continue
+    if txids and not txs and not wallets:
+        return None
 
-        wallet_details = [{
+    payload = [
+        {
+            "amount_btc": t.get("amount_btc") or 0,
+            "fee_btc": t.get("fee_btc") or 0,
+            "input_count": t.get("input_count") or len(t.get("input_addresses") or []),
+            "output_count": t.get("output_count") or len(t.get("output_addresses") or []),
+        }
+        for t in txs
+    ]
+    if len(payload) >= 2:
+        typ = classify_group(payload)
+    elif payload:
+        t0 = txs[0]
+        typ = classify_tx(
+            t0.get("amount_btc"), t0.get("fee_btc"),
+            t0.get("input_count") or len(t0.get("input_addresses") or []),
+            t0.get("output_count") or len(t0.get("output_addresses") or []),
+        )
+    else:
+        typ = classify_group([])
+        typ["label"] = (r.title or "Alert")[:48]
+
+    peak = max((t.get("amount_btc") or 0) for t in txs) if txs else 0
+    why_line = typ.get("why") or ""
+    stored_why = json.loads(r.evidence or "[]")
+    title = unique_title(typ, txs[0]["txid"] if len(txs) == 1 else None)
+    if len(txs) <= 1 and r.lead_type and "Anomaly" in (r.lead_type or ""):
+        title = unique_title(typ, txs[0]["txid"] if txs else None)
+
+    return {
+        "id": r.lead_id,
+        "rank": rank,
+        "priority": r.priority,
+        "score": r.score,
+        "confidence": r.confidence or r.score,
+        "title": title,
+        "why": stored_why,
+        "summary": (
+            f"{typ['label']}. {why_line} "
+            + (f"Peak {peak:.2f} BTC across {len(txs)} linked txs. " if len(txs) > 1 else "")
+            + (r.summary or "")
+        ).strip(),
+        "type": r.lead_type,
+        "typology": typ.get("code"),
+        "typology_label": typ.get("label"),
+        "peak_btc": round(peak, 6),
+        "txids": [t["txid"] for t in txs] if txs else txids,
+        "wallets": wallets,
+        "ips": json.loads(r.related_ips or "[]"),
+        "transactions": txs,
+        "wallet_details": [{
             "address": w,
             "explorer_url": f"https://www.blockchain.com/explorer/addresses/btc/{w}",
-        } for w in wallets[:12]]
+        } for w in wallets[:12]],
+        "red_flags": explain_alert(
+            db,
+            [t["txid"] for t in txs] if txs else txids,
+            wallets,
+            r.lead_type or "",
+            stats=stats,
+        ),
+    }
 
-        items.append({
+
+def _compact_alert(r, rank):
+    txids = [t for t in json.loads(r.related_txids or "[]") if t]
+    wallets = [w for w in json.loads(r.related_addresses or "[]") if w]
+    # Cluster members sometimes store TXIDs in address field when entity is a tx
+    txid = txids[0] if txids else ""
+    if not txid and wallets and len(wallets[0]) >= 32 and all(c in "0123456789abcdef" for c in wallets[0][:32].lower()):
+        txid = wallets[0]
+        wallets = wallets[1:]
+    return {
+        "id": r.lead_id,
+        "rank": rank,
+        "priority": r.priority or "LOW",
+        "score": r.score,
+        "confidence": r.confidence or r.score,
+        "title": r.title,
+        "type": r.lead_type,
+        "txid": txid,
+        "tx_count": len(txids) or (1 if txid else 0),
+        "wallet": wallets[0] if wallets else "",
+    }
+
+
+@app.get("/api/alerts")
+def alerts(limit: int = 80, offset: int = 0, compact: bool = False, db: Session = Depends(get_db)):
+    """Ranked alerts. compact=1 returns the full list (no pagination) for the dashboard."""
+    total = db.query(Lead).count()
+    if compact:
+        rows = db.query(Lead).order_by(Lead.score.desc()).all()
+        return {
+            "total": total,
+            "items": [_compact_alert(r, i + 1) for i, r in enumerate(rows)],
+        }
+    stats = dataset_stats(db) if total else None
+    rows = db.query(Lead).order_by(Lead.score.desc()).offset(max(offset, 0)).limit(min(max(limit, 1), 200)).all()
+    items = []
+    for i, r in enumerate(rows):
+        item = _alert_item(db, r, offset + i + 1, stats)
+        if item:
+            items.append(item)
+    return {"total": total, "offset": offset, "limit": limit, "items": items}
+
+
+def _resolve_alert_detail(db: Session, lead_id: str):
+    r = db.query(Lead).filter(Lead.lead_id == lead_id).first()
+    if not r:
+        raise HTTPException(404, "Alert not found")
+    rank = db.query(Lead).filter(Lead.score > (r.score or 0)).count() + 1
+    item = _alert_item(db, r, rank, dataset_stats(db))
+    if not item:
+        # Still return a usable card for cluster/wallet leads with no TX rows left
+        return {
             "id": r.lead_id,
-            "rank": len(items) + 1,
-            "priority": r.priority,
+            "rank": rank,
+            "priority": r.priority or "LOW",
             "score": r.score,
             "confidence": r.confidence or r.score,
             "title": r.title,
             "why": json.loads(r.evidence or "[]"),
-            "summary": r.summary,
+            "summary": r.summary or "",
             "type": r.lead_type,
-            "txids": [t["txid"] for t in txs] if txs else txids,
-            "wallets": wallets,
+            "typology": "cluster",
+            "typology_label": r.lead_type or "Cluster",
+            "peak_btc": 0,
+            "txids": json.loads(r.related_txids or "[]"),
+            "wallets": json.loads(r.related_addresses or "[]"),
             "ips": json.loads(r.related_ips or "[]"),
-            "transactions": txs,
-            "wallet_details": wallet_details,
-        })
-    return items
+            "transactions": [],
+            "wallet_details": [{
+                "address": w,
+                "explorer_url": f"https://www.blockchain.com/explorer/addresses/btc/{w}",
+            } for w in json.loads(r.related_addresses or "[]")[:12]],
+            "red_flags": None,
+        }
+    return item
+
+
+@app.get("/api/alert-detail")
+def alert_detail(id: str, db: Session = Depends(get_db)):
+    """Evidence for one alert. Query param avoids SPA catch-all stealing path routes."""
+    if not id:
+        raise HTTPException(400, "Missing id")
+    return _resolve_alert_detail(db, id)
 
 
 @app.post("/api/ingest")
@@ -241,14 +367,15 @@ def correlations(db: Session = Depends(get_db)):
 
 
 @app.get("/api/anomalies", response_model=list[AnomalyResult])
-def anomalies(db: Session = Depends(get_db)):
+def anomalies(limit: int = 10000, db: Session = Depends(get_db)):
+    rows = db.query(Anomaly).order_by(Anomaly.anomaly_score.desc()).limit(min(max(limit, 1), 20000)).all()
     return [AnomalyResult(
         txid=r.txid, anomaly_score=r.anomaly_score,
         confidence=r.confidence or _to_conf(r.anomaly_score),
         is_anomaly=bool(r.is_anomaly),
         reasons=json.loads(r.reasons or "[]"), severity=r.severity,
         amount_btc=r.amount_btc or 0, timestamp=r.timestamp,
-    ) for r in db.query(Anomaly).order_by(Anomaly.anomaly_score.desc())]
+    ) for r in rows]
 
 
 def _to_conf(score):
@@ -263,6 +390,21 @@ def clusters(db: Session = Depends(get_db)):
         transaction_count=r.transaction_count or 0,
         linked_ips=deserialize_addresses(r.linked_ips),
     ) for r in db.query(Cluster).order_by(Cluster.cluster_id, Cluster.total_volume_btc.desc())]
+
+
+@app.get("/api/geo/status")
+def geoip_status():
+    """Offline GeoIP engine: DB-IP Lite MMDB if present, else bundled prefix CSV."""
+    return geo_status()
+
+
+@app.post("/api/geo/download")
+def geoip_download():
+    """One-time fetch of DB-IP Lite (CC BY 4.0). After this, lookups stay offline."""
+    try:
+        return download_geoip()
+    except Exception as e:
+        raise HTTPException(502, f"GeoIP download failed: {e}") from e
 
 
 @app.get("/api/leads", response_model=list[InvestigativeLead])
@@ -284,4 +426,7 @@ if FRONTEND.exists():
 
     @app.get("/{path:path}")
     def ui(path: str):
+        # Never serve the SPA HTML for /api/* — that breaks fetch().json()
+        if path == "api" or path.startswith("api/"):
+            raise HTTPException(404, f"API route not found: /{path}")
         return FileResponse(FRONTEND / "index.html")

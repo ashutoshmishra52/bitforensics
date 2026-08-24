@@ -190,11 +190,19 @@ def _record(row) -> TransactionRecord | None:
         script = ScriptType.UNKNOWN
 
     src_ip = _get(merged, "src_ip")
+    dst_ip = _get(merged, "dst_ip")
     country = _get(merged, "geo_country")
     asn = _get(merged, "asn")
-    if src_ip and not country:
-        country, asn_val, _ = geo_lookup(src_ip)
-        asn = asn or asn_val
+    if not country:
+        for ip in (src_ip, dst_ip):
+            if not ip:
+                continue
+            c, a, _ = geo_lookup(ip)
+            if c and c != "UNK":
+                country, asn = c, (asn or a)
+                break
+            if not asn and a:
+                asn = a
 
     amount = _to_float(_get(merged, "amount_btc"))
     fee = _to_float(_get(merged, "fee_btc"))
@@ -247,7 +255,7 @@ def _record(row) -> TransactionRecord | None:
         txid=str(txid).strip(),
         timestamp=_time(ts),
         src_ip=src_ip, src_port=port("src_port"),
-        dst_ip=_get(merged, "dst_ip"), dst_port=port("dst_port"),
+        dst_ip=dst_ip, dst_port=port("dst_port"),
         input_addresses=inputs,
         output_addresses=outputs,
         input_amounts=in_amts,

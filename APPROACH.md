@@ -1,108 +1,116 @@
 # Technical Approach — BitForensics (SIH 2026, PS 26146)
 
-## Problem
+**Team write-up:** approach, model choice, and explainability. The system is a complete **offline Linux** prototype: ingest → correlate → ML → ranked leads → dashboard.
 
-Bitcoin's pseudonymous design lets bad actors move illicit funds while hiding behind wallet addresses and P2P network hops. NTRO needs an **offline** tool that joins network-layer data (IP, port, timing) with blockchain data (TXID, wallets, amounts) and surfaces suspicious activity with clear reasons.
+## Problem (as stated)
 
-## Our Approach
+Bitcoin’s pseudonymous P2P design lets illicit funds move, layer, and cash out (ransomware, darknet, extortion, laundering) outside traditional financial surveillance. NTRO needs an **offline** system that:
 
-### 1. Data Ingestion
+1. Ingests bulk Bitcoin **transaction + network** metadata (CSV / JSON / XML).
+2. Correlates **network-layer** (IP, port, timing) with **blockchain-layer** (wallets, TXID, amounts).
+3. Applies **AI/ML** (a working model, not rules-only) to detect anomalies, cluster entities, and emit **ranked, explainable** investigative leads.
+4. Shows findings on a dashboard / link-analysis view.
 
-Bulk metadata comes in as **CSV, JSON, or XML**. The parser normalises field names (e.g. `source_ip` → `src_ip`) and extracts:
+## Mapping to expected solution
 
-`timestamp`, `src/dst IP & port`, `txid`, `input/output addresses`, `input/output amounts`, `fee`, `script type`, `geo_country`, `asn`.
+| Expected deliverable | What we built |
+|---|---|
+| Workable complete offline Linux solution | FastAPI + SQLite + vanilla UI; `python run.py` → `http://localhost:8000` |
+| Ingestion, correlation, AI/ML in a code repo | `backend/ingest`, `backend/correlation`, `backend/ml` |
+| Short technical write-up | This file |
+| Dashboard with flagged entities and evidence | Overview, Alerts (why + confidence), Link Graph (red = flagged) |
 
-If geo fields are missing, we look up country/ASN from a bundled offline CSV (`data/geoip.csv`). No live internet needed.
+## 1. Ingest & parse bulk metadata
 
-### 2. Network ↔ Blockchain Correlation
+Parser: `backend/ingest/parser.py`. Formats: **CSV, JSON, XML**. Field aliases absorb messy synthetic dumps.
 
-For each TXID we collect linked wallet addresses and IP observations within a 5-minute window. A correlation score (0–1) is computed from:
+| PS field | Stored / used |
+|---|---|
+| `timestamp` | `transactions.timestamp` |
+| `src_ip`, `dst_ip`, `src_port`, `dst_port` | columns + graph IP nodes |
+| `txid` | unique key (same TXID in two files counts once) |
+| `input_addresses[]`, `output_addresses[]` | JSON lists |
+| `input_amounts[]`, `output_amounts[]` | JSON lists; sum used if total amount missing |
+| `amount` / fee / `script_type` | Isolation Forest features |
+| `geo_country` / `asn` | file fields **or** offline GeoIP lookup |
 
-- IP coverage (source + destination present)
-- Number of network observations sharing the same IP
-- Wallet fan-out
-- Transaction amount
+Missing geo is filled from IP via `backend/geo/lookup.py`.
 
-This links *who sent on the network* to *what moved on-chain*.
+## 2. Network ↔ blockchain correlation
 
-### 3. Entity Graph
+`backend/correlation/engine.py` joins observations around the same TXID in a timing window. Score (0–1) uses IP coverage, repeated IPs, wallet fan-out, and amount. Output: `correlations` table and IP/wallet/tx **entity graph** (`backend/graph/builder.py`).
 
-We build a graph with three node types:
+## 3. AI/ML (working models, not rule-only)
 
-| Node | Links to |
-|------|----------|
-| IP | transaction (src/dst) |
-| Wallet | transaction (input/output) |
-| Transaction | wallets and IPs |
+Trained **on the ingested dump at “Run Analysis”** (unsupervised). No cloud APIs.
 
-Flagged nodes (from ML alerts) get a red border in the link-analysis view.
+**Anomaly detection — Isolation Forest (scikit-learn)**  
+Features: log amount, log fee, fee ratio, input/output counts, I/O ratio, IP present, hour, P2SH, foreign geo, amount z-score.  
+Outputs: anomaly score → **confidence %** and severity.
 
-### 4. AI/ML Models (not rule-only)
+**Entity clustering — MiniBatchKMeans** (same sklearn family as the suggested clustering focus; chosen so 100k rows finish on a laptop). Groups wallets/txs by volume, counts, and linked IPs. Cluster labels feed typology (mixer / peel / consolidation / whale / dusting / etc.).
 
-**Anomaly detection — Isolation Forest (scikit-learn)**
+Rules and the 120 AML/KYT checklist are used **after** the model flags a row: they write the *why*, they do not replace Isolation Forest.
 
-- Trains on ingested data at analysis time (unsupervised)
-- Features: amount, fee ratio, input/output count, hour, script type, geo flag, IP presence
-- Outputs anomaly score + confidence (0–100%)
-- Explainability: after the model flags a row, we attach human-readable reasons (high amount, mixing pattern, foreign IP, etc.)
+## 4. Ranked, explainable alerts
 
-**Entity clustering — DBSCAN (scikit-learn)**
+Leads merge Isolation Forest hits + cluster groups + high correlations, sorted by score.
 
-- Groups wallets by volume, tx count, linked IPs, and counterparties
-- Labels clusters as "possible mixer", "high volume", "multi-node", etc.
+Each alert includes:
 
-Rules are used only for **explanation text**, not for the primary detection decision.
+- **Priority** and **confidence**
+- **Typology** (human label)
+- **Evidence bullets** (feature deviations)
+- **Red-flag panel** (matched conditions from the 120-list, intel-only flags not auto-claimed)
+- Linked **TXIDs, wallets, IPs**, geo/ASN, ports
 
-### 5. Ranked Alerts
+## 5. Dashboard / link analysis
 
-Alerts merge three sources, sorted by score:
+Offline HTML/CSS/JS (`frontend/dist/`): Overview stats, priority leads, highest-risk txs, **link graph** (IP / wallet / tx; red border = flagged), full Alerts, Transactions, Clusters, Upload.
 
-1. Isolation Forest anomalies (with confidence)
-2. DBSCAN wallet clusters
-3. High-scoring network-blockchain correlations
+## 6. GeoIP (open-source, downloadable, then offline)
 
-Each alert includes: priority, confidence %, summary, and a bullet list of *why* it was flagged.
+PS: *integrate open source downloadable Geo IP database*.
 
-### 6. Dashboard
+| Mode | When |
+|---|---|
+| Bundled prefix CSV `data/geoip.csv` | Default; **no internet** |
+| **DB-IP Lite** Country + ASN MaxMind `.mmdb` (CC BY 4.0) | Upload page → **Download DB-IP Lite** once |
 
-Simple offline web UI (no npm build needed):
-
-- Overview stats
-- **Link graph** — canvas force-layout of IP / wallet / tx nodes
-- **Alerts** — ranked list with confidence and reasons
-- Transactions table with geo/ASN
-- File upload
+After download, files live in `data/geoip/` and lookups stay air-gapped. APIs: `GET /api/geo/status`, `POST /api/geo/download`.
 
 ## Stack
 
 | Layer | Choice |
-|-------|--------|
+|---|---|
 | Backend | Python 3.9+, FastAPI |
-| ML | scikit-learn (Isolation Forest, DBSCAN) |
+| ML | scikit-learn Isolation Forest + MiniBatchKMeans |
 | Storage | SQLite |
-| Geo | Offline CSV lookup |
+| Geo | DB-IP Lite MMDB (`maxminddb`) or bundled CSV |
 | Frontend | Plain HTML/CSS/JS |
-| Platform | Linux (also runs on macOS for dev) |
+| Platform | Linux (macOS for dev) |
 
-## Explainability Method
+## Explainability method
 
-1. **Model score** — Isolation Forest decision function → confidence %
-2. **Feature attribution** — check which features deviate (amount, fan-out, fee, geo, time)
-3. **Evidence list** — plain-language bullets shown in the alert panel
-4. **Graph context** — flagged nodes highlighted in link-analysis view
+1. **Model score** — Isolation Forest decision function → confidence 0–100%.
+2. **Feature attribution** — which features deviate (amount, fan-out, fee, geo, time).
+3. **Evidence list** — plain-language bullets on the alert card.
+4. **Typology + 120-condition flags** — investigative language, not a court finding.
+5. **Graph context** — flagged nodes highlighted in link analysis.
 
 ## Limitations
 
-- Synthetic/demo dataset only (no real seized data)
-- Geo lookup uses a small bundled prefix table; production would use MaxMind GeoLite2 offline DB
-- Graph layout is basic force-directed; large datasets may need sampling
+- Synthetic/demo data only (no seized or live intercept).
+- Graph is sampled force-layout for large dumps.
+- DB-IP download needs internet **once**; daily use is offline.
 
-## How to Run (Linux)
+## How to run (Linux)
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 python run.py
-# open http://localhost:8000
+# http://localhost:8000
+# Upload CSV/JSON/XML → Run Analysis
 ```

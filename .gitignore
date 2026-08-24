@@ -1,7 +1,11 @@
 venv/
+node_modules/
 __pycache__/
 *.pyc
 data/bitforensics.db
+data/geoip/*.mmdb
+data/geoip/*.mmdb.gz
+data/geoip/*.part
 .DS_Store
 *.egg-info/
 /dist/

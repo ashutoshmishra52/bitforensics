@@ -3,7 +3,7 @@ const API = '/api';
 const pages = {
   dashboard: ['Overview', 'Bitcoin transaction monitoring'],
   graph: ['Link Graph', 'IP, wallet and transaction connections'],
-  alerts: ['Alerts', 'Full TXID, explorer links, and model reasons'],
+  alerts: ['Alerts', 'Full TXID, explorer links, and 120-condition explanations'],
   transactions: ['Transactions', 'All ingested records'],
   clusters: ['Clusters', 'Related wallets or similar transactions'],
   upload: ['Upload', 'Add a CSV, JSON, or XML file'],
@@ -23,18 +23,39 @@ function toast(msg) {
 
 async function api(url, opts) {
   const res = await fetch(url, opts);
+  const text = await res.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch (e) {
+    if (!res.ok) throw new Error('Request failed (' + res.status + ')');
+    throw new Error('Server returned HTML instead of JSON — restart python run.py');
+  }
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    const detail = err.detail;
+    const detail = data && data.detail;
     throw new Error(typeof detail === 'string' ? detail : (detail ? JSON.stringify(detail) : 'Request failed'));
   }
-  return res.json();
+  return data;
 }
 
 function cut(str, n) {
   if (!str) return '-';
   n = n || 18;
   return str.length > n ? str.slice(0, n) + '...' : str;
+}
+
+function fmtBtc(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return '-';
+  if (x >= 100) return x.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  if (x >= 1) return x.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  if (x >= 0.0001) return x.toFixed(6);
+  return x.toExponential(2);
+}
+
+function typeChip(code, label) {
+  const c = code || 'cluster';
+  return '<span class="type-chip ' + esc(c) + '">' + esc(label || c) + '</span>';
 }
 
 function pill(level) {
@@ -74,11 +95,11 @@ function txBlock(t) {
     + '</div>'
     + '<div class="detail-grid">'
     + '<div><span class="detail-label">Time</span><span>' + esc(time) + '</span></div>'
-    + '<div><span class="detail-label">Amount</span><span>' + esc(amount) + ' BTC</span></div>'
-    + '<div><span class="detail-label">Fee</span><span>' + esc(fee) + ' BTC</span></div>'
+    + '<div><span class="detail-label">Amount</span><span>' + esc(fmtBtc(amount)) + ' BTC</span></div>'
+    + '<div><span class="detail-label">Fee</span><span>' + esc(fmtBtc(fee)) + ' BTC</span></div>'
     + '<div><span class="detail-label">Script</span><span>' + esc(t.script_type || '-') + '</span></div>'
-    + '<div><span class="detail-label">Src IP</span><span>' + esc(t.src_ip || '-') + '</span></div>'
-    + '<div><span class="detail-label">Dst IP</span><span>' + esc(t.dst_ip || '-') + '</span></div>'
+    + '<div><span class="detail-label">Src IP</span><span>' + esc(t.src_ip || '-') + (t.src_port ? ':' + t.src_port : '') + '</span></div>'
+    + '<div><span class="detail-label">Dst IP</span><span>' + esc(t.dst_ip || '-') + (t.dst_port ? ':' + t.dst_port : '') + '</span></div>'
     + '<div><span class="detail-label">Country</span><span>' + esc(t.geo_country || '-') + '</span></div>'
     + '<div><span class="detail-label">ASN</span><span>' + esc(t.asn || '-') + '</span></div>'
     + '</div>';
@@ -149,80 +170,183 @@ async function loadStats() {
   }
 }
 
-async function loadDashAlerts() {
-  const rows = await api(API + '/alerts');
-  const el = $('dash-alerts');
+function alertRows(data) {
+  if (Array.isArray(data)) return data;
+  return (data && data.items) || [];
+}
+
+let _alertsReq = null;
+function fetchAllAlerts() {
+  if (!_alertsReq) _alertsReq = api(API + '/alerts?compact=1');
+  return _alertsReq;
+}
+
+function renderAlertTable(el, rows, total, expandable) {
+  if (!el) return;
   if (!rows.length) {
     el.innerHTML = '<p class="empty">No alerts yet. Click Run Analysis.</p>';
     return;
   }
-  el.innerHTML = rows.slice(0, 8).map(function (a) {
-    const tx = (a.transactions && a.transactions[0]) || null;
-    return '<div class="item">'
-      + '<div class="item-title">#' + a.rank + ' ' + esc(a.title) + '</div>'
-      + '<div class="item-meta">' + pill(a.priority) + ' confidence ' + a.confidence + '%</div>'
-      + (tx ? '<div class="item-meta mono">' + esc(cut(tx.txid, 28)) + '</div>' : '')
-      + '</div>';
+  const head = '<p class="count-line">Showing all <strong>' + Number(total).toLocaleString()
+    + '</strong> alerts from this analysis.</p>';
+  const body = rows.map(function (a) {
+    const tx = a.txid || '';
+    const wallet = a.wallet || '';
+    const linkCell = tx
+      ? '<a class="txid-link" href="' + esc(btcTxUrl(tx)) + '" target="_blank" rel="noopener">' + esc(cut(tx, 16)) + '</a>'
+      : (wallet
+        ? '<a class="txid-link" href="' + esc(btcAddrUrl(wallet)) + '" target="_blank" rel="noopener">' + esc(cut(wallet, 16)) + '</a>'
+        : '—');
+    return '<tr class="alert-line" data-id="' + esc(a.id) + '">'
+      + '<td class="num">' + a.rank + '</td>'
+      + '<td>' + pill(a.priority) + '</td>'
+      + '<td>' + esc(a.title || a.type || '-') + '</td>'
+      + '<td class="num">' + (a.confidence != null ? a.confidence : '-') + '%</td>'
+      + '<td class="num">' + (a.score != null ? a.score : '-') + '</td>'
+      + '<td class="mono">' + linkCell + '</td>'
+      + '<td class="num">' + (a.tx_count > 1 ? a.tx_count + ' txs' : (wallet && !tx ? 'wallet' : '')) + '</td>'
+      + '</tr>';
   }).join('');
+  el.innerHTML = head
+    + '<div class="table-box tight">'
+    + '<table class="alert-table">'
+    + '<thead><tr><th>#</th><th>Priority</th><th>Alert</th><th>Conf</th><th>Score</th><th>TXID</th><th></th></tr></thead>'
+    + '<tbody>' + body + '</tbody></table></div>';
+  if (!expandable) return;
+  el.querySelectorAll('tr.alert-line').forEach(function (tr) {
+    tr.addEventListener('click', function (e) {
+      if (e.target.closest('a, button')) return;
+      toggleAlertDetail(tr);
+    });
+  });
+}
+
+async function toggleAlertDetail(tr) {
+  const id = tr.getAttribute('data-id');
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains('alert-detail')) {
+    next.remove();
+    tr.classList.remove('is-open');
+    return;
+  }
+  const open = tr.parentNode.querySelector('tr.alert-detail');
+  if (open) {
+    const prev = open.previousElementSibling;
+    if (prev) prev.classList.remove('is-open');
+    open.remove();
+  }
+  tr.classList.add('is-open');
+  const hold = document.createElement('tr');
+  hold.className = 'alert-detail';
+  hold.innerHTML = '<td colspan="7"><div class="alert-expand"><p class="empty">Loading evidence…</p></div></td>';
+  tr.parentNode.insertBefore(hold, tr.nextSibling);
+  try {
+    const a = await api(API + '/alert-detail?id=' + encodeURIComponent(id));
+    hold.querySelector('.alert-expand').innerHTML = renderAlertCard(a);
+  } catch (e) {
+    hold.querySelector('.alert-expand').innerHTML =
+      '<p class="empty err-inline">' + esc(e.message) + '</p>';
+  }
+}
+
+async function loadDashAlerts() {
+  const data = await fetchAllAlerts();
+  renderAlertTable($('dash-alerts'), alertRows(data), data.total || alertRows(data).length, true);
 }
 
 async function loadDashAnomalies() {
-  const rows = await api(API + '/anomalies');
+  const rows = await api(API + '/anomalies?limit=20000');
   const el = $('dash-anomalies');
   if (!rows.length) {
     el.innerHTML = '<p class="empty">Nothing flagged yet.</p>';
     return;
   }
-  el.innerHTML = rows.slice(0, 8).map(function (a) {
-    return '<div class="item">'
-      + '<div class="item-title mono">' + esc(cut(a.txid, 28)) + ' · ' + a.amount_btc + ' BTC</div>'
-      + '<div class="item-meta">' + pill(a.severity) + ' confidence ' + a.confidence + '%</div>'
-      + '<div class="detail-links compact"><a class="ext-link primary-link" href="' + esc(btcTxUrl(a.txid)) + '" target="_blank" rel="noopener">blockchain.com</a></div>'
+  el.innerHTML = '<p class="count-line">Showing all <strong>' + rows.length.toLocaleString()
+    + '</strong> Isolation Forest outliers.</p>'
+    + '<div class="table-box tight"><table class="alert-table">'
+    + '<thead><tr><th>TXID</th><th>Amount</th><th>Severity</th><th>Conf</th><th></th></tr></thead><tbody>'
+    + rows.map(function (a) {
+      return '<tr>'
+        + '<td class="mono"><a class="txid-link" href="' + esc(btcTxUrl(a.txid)) + '" target="_blank" rel="noopener">' + esc(cut(a.txid, 18)) + '</a></td>'
+        + '<td class="num">' + fmtBtc(a.amount_btc) + ' BTC</td>'
+        + '<td>' + pill(a.severity) + '</td>'
+        + '<td class="num">' + a.confidence + '%</td>'
+        + '<td><a class="ext-link" href="' + esc(btcTxUrl(a.txid)) + '" target="_blank" rel="noopener">explorer</a></td>'
+        + '</tr>';
+    }).join('')
+    + '</tbody></table></div>';
+}
+
+function redFlagPanel(rf) {
+  if (!rf) {
+    return '<aside class="flag-panel"><p class="empty">No 120-condition match yet.</p></aside>';
+  }
+  let html = '<aside class="flag-panel">'
+    + '<h4>Why this looks suspicious</h4>'
+    + '<p class="flag-meta">Matched <strong>' + (rf.matched || 0) + '</strong> of 120 AML/KYT conditions · risk '
+    + esc(rf.risk_level || '-') + ' (' + (rf.risk_points || 0) + ' pts)</p>';
+  const cats = rf.categories && rf.categories.length ? rf.categories : [];
+  if (!cats.length) {
+    html += '<p class="empty">Not enough on-chain shape to map a red flag. Indicators are not proof of crime.</p></aside>';
+    return html;
+  }
+  cats.forEach(function (c) {
+    html += '<div class="flag-cat"><div class="flag-cat-name">' + esc(c.name) + '</div>';
+    (c.flags || []).forEach(function (f) {
+      html += '<div class="flag-item">'
+        + '<div class="flag-id">#' + f.id + '</div>'
+        + '<div><div class="flag-text">' + esc(f.condition) + '</div>'
+        + '<div class="flag-why">' + esc(f.why) + '</div></div></div>';
+    });
+    html += '</div>';
+  });
+  html += '<p class="flag-note">' + esc(rf.disclaimer || '') + '</p></aside>';
+  return html;
+}
+
+function renderAlertCard(a) {
+  let body = '<article class="alert-card">'
+    + '<header class="alert-head"><div>'
+    + '<div class="item-title">#' + a.rank + ' ' + typeChip(a.typology, a.typology_label) + ' ' + esc(a.title) + '</div>'
+    + '<div class="item-meta">' + esc(a.id) + ' · ' + esc(a.type) + ' · score ' + a.score + '</div>'
+    + '</div><div class="alert-badges">' + pill(a.priority)
+    + '<span class="conf">confidence ' + a.confidence + '%</span></div></header>'
+    + '<p class="alert-summary">' + esc(a.summary) + '</p>';
+
+  if (a.why && a.why.length) {
+    body += '<ul class="why-list">' + a.why.map(function (r) { return '<li>' + esc(r) + '</li>'; }).join('') + '</ul>';
+  }
+
+  if (a.transactions && a.transactions.length) {
+    body += a.transactions.filter(function (t) {
+      return t.amount_btc == null || Number(t.amount_btc) > 0;
+    }).map(txBlock).join('');
+  } else if (a.txids && a.txids.length) {
+    body += a.txids.map(function (id) {
+      return txBlock({ txid: id, blockchain_url: btcTxUrl(id) });
+    }).join('');
+  }
+
+  if (a.wallets && a.wallets.length && !(a.transactions && a.transactions.length)) {
+    body += '<div class="addr-section"><span class="detail-label">Wallets</span><div>'
+      + a.wallets.slice(0, 8).map(function (w) {
+        return '<a class="tag link-tag" href="' + esc(btcAddrUrl(w)) + '" target="_blank" rel="noopener">' + esc(cut(w, 20)) + '</a>';
+      }).join('') + '</div></div>';
+  }
+  if (a.ips && a.ips.length) {
+    body += '<div class="ip-row"><span class="detail-label">IPs</span>'
+      + a.ips.map(function (ip) { return '<span class="tag">' + esc(ip) + '</span>'; }).join('')
       + '</div>';
-  }).join('');
+  }
+  body += '</article>';
+  return '<div class="alert-row">' + body + redFlagPanel(a.red_flags) + '</div>';
 }
 
 async function loadAlerts() {
-  const rows = await api(API + '/alerts');
+  const data = await fetchAllAlerts();
+  const rows = alertRows(data);
   const el = $('alert-list');
-  if (!rows.length) {
-    el.innerHTML = '<p class="empty">No alerts yet. Upload data and click Run Analysis.</p>';
-    return;
-  }
-  el.innerHTML = rows.map(function (a) {
-    let body = '<article class="alert-card">'
-      + '<header class="alert-head"><div>'
-      + '<div class="item-title">#' + a.rank + ' ' + esc(a.title) + '</div>'
-      + '<div class="item-meta">' + esc(a.id) + ' · ' + esc(a.type) + ' · score ' + a.score + '</div>'
-      + '</div><div class="alert-badges">' + pill(a.priority)
-      + '<span class="conf">confidence ' + a.confidence + '%</span></div></header>'
-      + '<p class="alert-summary">' + esc(a.summary) + '</p>';
-
-    if (a.why && a.why.length) {
-      body += '<ul class="why-list">' + a.why.map(function (r) { return '<li>' + esc(r) + '</li>'; }).join('') + '</ul>';
-    }
-
-    if (a.transactions && a.transactions.length) {
-      body += a.transactions.filter(function (t) {
-        return t.amount_btc == null || Number(t.amount_btc) > 0;
-      }).map(txBlock).join('');
-    } else if (a.txids && a.txids.length) {
-      body += a.txids.map(function (id) {
-        return txBlock({
-          txid: id,
-          blockchain_url: btcTxUrl(id),
-        });
-      }).join('');
-    }
-
-    if (a.ips && a.ips.length) {
-      body += '<div class="ip-row"><span class="detail-label">IPs</span>'
-        + a.ips.map(function (ip) { return '<span class="tag">' + esc(ip) + '</span>'; }).join('')
-        + '</div>';
-    }
-    body += '</article>';
-    return body;
-  }).join('');
+  renderAlertTable(el, rows, data.total || rows.length, true);
 }
 
 async function loadTransactions() {
@@ -282,6 +406,7 @@ async function loadGraph() {
 }
 
 async function refresh() {
+  _alertsReq = null;
   try {
     await Promise.all([
       loadStats(),
@@ -290,6 +415,7 @@ async function refresh() {
       loadAlerts(),
       loadTransactions(),
       loadClusters(),
+      loadGeoStatus(),
     ]);
     if ($('tab-graph') && $('tab-graph').classList.contains('active')) {
       await loadGraph();
@@ -321,29 +447,72 @@ async function runAnalysis() {
 
 async function uploadFile(file) {
   const msg = $('upload-msg');
+  const drop = $('drop-zone');
+  const progress = $('upload-progress');
+  const ptext = $('upload-progress-text');
   if (msg) {
     msg.className = '';
-    msg.textContent = 'Uploading ' + file.name + '...';
+    msg.textContent = '';
   }
+  if (drop) drop.classList.add('busy');
+  if (progress) progress.hidden = false;
+  if (ptext) ptext.textContent = 'Uploading ' + file.name + '…';
   const form = new FormData();
   form.append('file', file);
   try {
     const res = await api(API + '/ingest', { method: 'POST', body: form });
-    if (msg) {
-      msg.className = 'ok';
-      msg.textContent = res.message;
-      if (res.skipped_duplicates) {
-        msg.textContent += ' Duplicate TXIDs are merged — total unique rows: ' + Number(res.total_in_db || 0).toLocaleString() + '.';
-      }
-    }
+    if (ptext) ptext.textContent = 'Loaded. Opening Overview…';
     toast('Total in database: ' + Number(res.total_in_db || 0).toLocaleString());
     await refresh();
+    showTab('dashboard');
   } catch (e) {
     if (msg) {
       msg.className = 'err';
       msg.textContent = e.message;
     }
     toast(e.message);
+  } finally {
+    if (drop) drop.classList.remove('busy');
+    if (progress) progress.hidden = true;
+    if (input) input.value = '';
+  }
+}
+
+async function loadGeoStatus() {
+  const el = $('geo-status');
+  const side = $('sidebar-status');
+  try {
+    const g = await api(API + '/geo/status');
+    const engine = g.engine === 'db-ip-mmdb' ? 'DB-IP Lite MMDB' : 'bundled GeoIP CSV';
+    if (el) {
+      el.textContent = 'Engine: ' + engine + ' · country DB ' + (g.country_db ? 'yes' : 'no') + ' · ASN DB ' + (g.asn_db ? 'yes' : 'no') + ' · ' + (g.source || '');
+    }
+    if (side) side.textContent = 'Offline · Linux · Geo ' + (g.engine === 'db-ip-mmdb' ? 'MMDB' : 'CSV');
+  } catch (e) {
+    if (el) el.textContent = 'GeoIP status unavailable';
+  }
+}
+
+async function downloadGeo() {
+  const btn = $('btn-geo');
+  const el = $('geo-status');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Downloading…';
+  }
+  if (el) el.textContent = 'Fetching DB-IP Lite (needs internet once)…';
+  try {
+    const res = await api(API + '/geo/download', { method: 'POST' });
+    toast(res.message || 'GeoIP ready');
+    await loadGeoStatus();
+  } catch (e) {
+    toast(e.message);
+    if (el) el.textContent = e.message;
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Download DB-IP Lite';
+    }
   }
 }
 
@@ -377,6 +546,7 @@ bind('btn-run', 'click', runAnalysis);
 bind('btn-refresh', 'click', refresh);
 bind('btn-clear', 'click', clearData);
 bind('btn-clear-upload', 'click', clearData);
+bind('btn-geo', 'click', downloadGeo);
 
 document.body.addEventListener('click', function (e) {
   const btn = e.target.closest('[data-copy]');

@@ -1,0 +1,13 @@
+{
+  "name": "bit-forensics",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Offline Bitcoin forensic dashboard (SIH PS 26146). Start with npm run dev on Windows, macOS, or Linux.",
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "start": "node scripts/dev.js"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}

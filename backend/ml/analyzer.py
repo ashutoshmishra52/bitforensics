@@ -17,6 +17,7 @@ from backend.database.db import (
     Anomaly, Cluster, Correlation, Lead, Transaction,
     deserialize_addresses, serialize_addresses,
 )
+from backend.ml.typology import classify_group, classify_tx, unique_title
 from backend.models.schemas import AnomalyResult, ClusterMember, InvestigativeLead
 
 MODEL_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "models"
@@ -29,10 +30,9 @@ FEATURE_COLS = [
     "io_ratio", "has_ip", "hour", "is_p2sh", "foreign_geo", "amount_z",
 ]
 
-# Cap stored anomalies — enough to not miss strong cases, still fast in UI
-MAX_ANOMALIES_STORE = 400
-MAX_CLUSTER_MEMBERS = 100
-MAX_ALERTS_FROM_ANOMALIES = 40
+# Store real Isolation Forest hits (scaled by dataset). UI paginates alerts.
+MAX_ANOMALIES_STORE = 8000
+MAX_CLUSTER_MEMBERS = 200
 MIN_AMOUNT_BTC = 1e-8  # ignore dust / zero-value rows in alerts
 
 
@@ -153,16 +153,6 @@ def detect_anomalies(db: Session) -> list[AnomalyResult]:
 
     amounts = extras["amount_btc"]
     positive = amounts > MIN_AMOUNT_BTC
-
-    # Extreme cases — only when there is a real BTC amount
-    extra_mask = positive & (
-        (extras["amount_z"] > 2.8)
-        | ((extras["fee_ratio"] > 0.06) & (amounts > MIN_AMOUNT_BTC))
-        | ((extras["output_count"] >= 12) & (amounts > 0.001))
-        | ((extras["input_count"] >= 10) & (amounts > 0.5))
-    )
-    flags = np.where(extra_mask, -1, flags)
-    # Never alert on zero / empty amount transactions
     flags = np.where(~positive, 1, flags)
 
     joblib.dump(model, MODEL_PATH)
@@ -176,7 +166,8 @@ def detect_anomalies(db: Session) -> list[AnomalyResult]:
     anom_idx = np.where(flags == -1)[0]
     if len(anom_idx) == 0:
         return []
-    order = anom_idx[np.argsort(-scores[anom_idx])][:MAX_ANOMALIES_STORE]
+    store_n = min(MAX_ANOMALIES_STORE, len(anom_idx))
+    order = anom_idx[np.argsort(-scores[anom_idx])][:store_n]
     anomaly_scores = scores[order]
 
     found = []
@@ -348,9 +339,14 @@ def _tx_behavior_clusters(db: Session) -> list[ClusterMember]:
         if len(group) < 8:
             continue
         vol = sum(t.amount_btc or 0 for t in group)
-        kind = "Possible mixing pattern" if any((t.output_count or 0) >= 10 for t in group) else (
-            "High-volume pattern" if vol / len(group) > 1 else "Similar behavior group"
-        )
+        typ = classify_group([
+            {
+                "amount_btc": t.amount_btc, "fee_btc": t.fee_btc,
+                "input_count": t.input_count, "output_count": t.output_count,
+            }
+            for t in group
+        ])
+        kind = typ["label"]
         top = sorted(group, key=lambda t: t.amount_btc or 0, reverse=True)[:12]
         for t in top:
             if (t.amount_btc or 0) <= MIN_AMOUNT_BTC:
@@ -414,24 +410,34 @@ def generate_leads(db: Session, anomalies, clusters) -> list[InvestigativeLead]:
     db.commit()
     leads = []
 
-    for a in anomalies[:MAX_ALERTS_FROM_ANOMALIES]:
-        if (a.amount_btc or 0) <= MIN_AMOUNT_BTC:
-            continue
-        tx = db.query(Transaction).filter(Transaction.txid == a.txid).first()
+    usable = [a for a in anomalies if (a.amount_btc or 0) > MIN_AMOUNT_BTC]
+    by_txid = {}
+    ids = [a.txid for a in usable]
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        for t in db.query(Transaction).filter(Transaction.txid.in_(chunk)).all():
+            by_txid[t.txid] = t
+
+    for a in usable:
+        tx = by_txid.get(a.txid)
         addrs, ips = [], []
         if tx:
             addrs = deserialize_addresses(tx.input_addresses) + deserialize_addresses(tx.output_addresses)
             ips = [ip for ip in [tx.src_ip, tx.dst_ip] if ip]
         boost = 20 if a.severity == "CRITICAL" else 10 if a.severity == "HIGH" else 0
         score = min(a.anomaly_score * 100 + boost, 100)
+        inn = tx.input_count if tx else 0
+        outn = tx.output_count if tx else 0
+        hour = tx.timestamp.hour if tx and tx.timestamp else 12
+        typ = classify_tx(a.amount_btc, tx.fee_btc if tx else 0, inn, outn, hour)
         leads.append(InvestigativeLead(
-            lead_id=f"L-{uuid.uuid4().hex[:6].upper()}",
+            lead_id=f"L-{uuid.uuid4().hex[:8].upper()}",
             priority=a.severity, score=round(score, 1), confidence=a.confidence,
-            title=f"Suspicious transaction {a.txid[:16]}...",
+            title=unique_title(typ, a.txid),
             summary=(
-                f"Isolation Forest flagged {a.amount_btc:.6f} BTC "
-                f"(confidence {a.confidence}%). "
-                + (a.reasons[0] if a.reasons else "Unusual pattern detected.")
+                f"{typ['label']}: Isolation Forest scored {a.amount_btc:.4f} BTC "
+                f"(confidence {a.confidence}%). {typ['why']} "
+                + (a.reasons[0] if a.reasons else "")
             ),
             evidence=a.reasons, related_txids=[a.txid],
             related_addresses=addrs[:10], related_ips=ips, lead_type="Anomaly Detection",
@@ -452,25 +458,46 @@ def generate_leads(db: Session, anomalies, clusters) -> list[InvestigativeLead]:
         ips = {ip for m in group for ip in m.linked_ips}
         conf = round(min(40 + len(group) * 4 + min(vol, 20), 92), 1)
         looks_like_txid = all(len(m.address) >= 32 for m in group[:3])
-        title = (
-            f"Behavior cluster #{cid}: {len(group)} similar transactions"
-            if looks_like_txid else
-            f"Wallet cluster #{cid}: {len(group)} linked addresses"
+        typ = classify_group([
+            {"amount_btc": m.total_volume_btc, "outputs": 8 if "mix" in (m.entity_type or "").lower() else 2}
+            for m in group
+        ])
+        typ["n"] = len(group)
+        typ["label"] = group[0].entity_type or typ["label"]
+        title = unique_title(typ) if looks_like_txid else (
+            f"{group[0].entity_type}: {len(group)} linked wallets"
         )
+        peak = max((m.total_volume_btc or 0) for m in group)
+        related_tx = [m.address for m in group[:10]] if looks_like_txid else []
+        related_wallets = [] if looks_like_txid else [m.address for m in group[:10]]
+        if not related_tx and related_wallets:
+            # Attach sample TXIDs so the alerts table is not blank for wallet clusters
+            want = set(related_wallets[:4])
+            for t in db.query(Transaction.txid, Transaction.input_addresses, Transaction.output_addresses).limit(4000):
+                addrs = set(deserialize_addresses(t.input_addresses)) | set(deserialize_addresses(t.output_addresses))
+                if want & addrs:
+                    related_tx.append(t.txid)
+                if len(related_tx) >= 3:
+                    break
         leads.append(InvestigativeLead(
             lead_id=f"L-{uuid.uuid4().hex[:6].upper()}",
             priority="HIGH" if vol > 5 or len(group) > 10 else "MEDIUM",
-            score=round(min(50 + vol * 2 + len(group) * 3, 95), 1), confidence=conf,
+            score=round(min(48 + min(peak, 40) + len(group) * 1.2 + (8 if "mix" in title.lower() else 0), 96), 1),
+            confidence=conf,
             title=title,
-            summary=f"{group[0].entity_type}. Combined volume {vol:.4f} BTC across {len(group)} entities.",
+            summary=(
+                f"{group[0].entity_type}. {len(group)} linked records, "
+                f"peak {peak:.2f} BTC, combined {vol:.2f} BTC. {typ['why']}"
+            ),
             evidence=[
-                f"Cluster size: {len(group)}",
+                f"Typology: {group[0].entity_type}",
+                f"Linked records: {len(group)}",
+                f"Peak amount: {peak:.4f} BTC",
                 f"Combined volume: {vol:.4f} BTC",
                 f"Shared IPs: {len(ips)}",
-                f"Type: {group[0].entity_type}",
             ],
-            related_txids=[m.address for m in group[:10]] if looks_like_txid else [],
-            related_addresses=[] if looks_like_txid else [m.address for m in group[:10]],
+            related_txids=related_tx,
+            related_addresses=related_wallets,
             related_ips=sorted(ips)[:10],
             lead_type="Entity Clustering",
         ))
