@@ -30,9 +30,10 @@ FEATURE_COLS = [
     "io_ratio", "has_ip", "hour", "is_p2sh", "foreign_geo", "amount_z",
 ]
 
-# Store real Isolation Forest hits (scaled by dataset). UI paginates alerts.
-MAX_ANOMALIES_STORE = 8000
-MAX_CLUSTER_MEMBERS = 200
+# Store Isolation Forest hits (UI paginates). Cap keeps analysis fast on 100k.
+MAX_ANOMALIES_STORE = 2500
+MAX_ANOMALY_LEADS = 120
+MAX_CLUSTER_MEMBERS = 120
 MIN_AMOUNT_BTC = 1e-8  # ignore dust / zero-value rows in alerts
 
 
@@ -105,11 +106,27 @@ def _load_feature_matrix(db: Session):
     return X, txids, lookup, extras
 
 
-def _to_confidence(score: float, scores: np.ndarray) -> float:
-    if len(scores) == 0:
+def _to_confidence(score: float, ranks: dict | None = None, scores: np.ndarray | None = None) -> float:
+    if ranks is not None:
+        # Precomputed: higher anomaly score → higher confidence
+        return ranks.get(score, 50.0)
+    if scores is None or len(scores) == 0:
         return 50.0
     pct = float((scores <= score).mean() * 100)
     return round(min(max(pct, 8), 99), 1)
+
+
+def _confidence_map(scores: np.ndarray) -> dict:
+    """O(n log n) once instead of O(n²) per-anomaly percentile."""
+    if len(scores) == 0:
+        return {}
+    order = np.argsort(scores)
+    n = len(scores)
+    out = {}
+    for rank, idx in enumerate(order):
+        pct = round(min(max((rank + 1) / n * 100, 8), 99), 1)
+        out[float(scores[idx])] = pct
+    return out
 
 
 def detect_anomalies(db: Session) -> list[AnomalyResult]:
@@ -127,18 +144,18 @@ def detect_anomalies(db: Session) -> list[AnomalyResult]:
     scaler = StandardScaler()
     Xs = scaler.fit_transform(X)
 
-    # Catch more outliers on large dumps without making analysis slow
+    # Fast defaults for laptop demo — still finds clear outliers
     if n >= 50000:
-        contamination = 0.06
-        n_estimators = 100
-        max_samples = min(12000, n)
+        contamination = 0.05
+        n_estimators = 60
+        max_samples = min(6000, n)
     elif n >= 10000:
         contamination = 0.07
-        n_estimators = 120
-        max_samples = min(10000, n)
+        n_estimators = 80
+        max_samples = min(5000, n)
     else:
         contamination = 0.10
-        n_estimators = 150
+        n_estimators = 100
         max_samples = n
 
     model = IsolationForest(
@@ -147,6 +164,7 @@ def detect_anomalies(db: Session) -> list[AnomalyResult]:
         max_samples=max_samples,
         random_state=42,
         n_jobs=-1,
+        bootstrap=False,
     )
     flags = model.fit_predict(Xs)
     scores = -model.decision_function(Xs)
@@ -155,13 +173,16 @@ def detect_anomalies(db: Session) -> list[AnomalyResult]:
     positive = amounts > MIN_AMOUNT_BTC
     flags = np.where(~positive, 1, flags)
 
-    joblib.dump(model, MODEL_PATH)
-    joblib.dump({
-        "features": FEATURE_COLS,
-        "contamination": contamination,
-        "n": n,
-        "n_estimators": n_estimators,
-    }, SCALER_PATH)
+    try:
+        joblib.dump(model, MODEL_PATH, compress=0)
+        joblib.dump({
+            "features": FEATURE_COLS,
+            "contamination": contamination,
+            "n": n,
+            "n_estimators": n_estimators,
+        }, SCALER_PATH, compress=0)
+    except Exception:
+        pass
 
     anom_idx = np.where(flags == -1)[0]
     if len(anom_idx) == 0:
@@ -169,6 +190,7 @@ def detect_anomalies(db: Session) -> list[AnomalyResult]:
     store_n = min(MAX_ANOMALIES_STORE, len(anom_idx))
     order = anom_idx[np.argsort(-scores[anom_idx])][:store_n]
     anomaly_scores = scores[order]
+    conf_map = _confidence_map(anomaly_scores)
 
     found = []
     batch = []
@@ -177,12 +199,13 @@ def detect_anomalies(db: Session) -> list[AnomalyResult]:
             continue
         tx = lookup[txids[i]]
         row = {k: float(extras[k][i]) for k in extras}
-        reasons = _reasons(row, tx, float(scores[i]), anomaly_scores)
-        severity = _severity(float(scores[i]), row["amount_btc"], anomaly_scores)
-        conf = _to_confidence(float(scores[i]), anomaly_scores)
+        sc = float(scores[i])
+        reasons = _reasons(row, tx, sc, anomaly_scores)
+        severity = _severity(sc, row["amount_btc"], anomaly_scores)
+        conf = _to_confidence(sc, ranks=conf_map)
         result = AnomalyResult(
             txid=txids[i],
-            anomaly_score=round(float(scores[i]), 4),
+            anomaly_score=round(sc, 4),
             confidence=conf,
             is_anomaly=True,
             reasons=reasons,
@@ -258,8 +281,13 @@ def cluster_entities(db: Session) -> list[ClusterMember]:
     db.query(Cluster).delete()
     db.commit()
 
-    # Prefer wallet clustering when addresses exist (sample for speed)
-    sample = db.query(Transaction).limit(15000).all()
+    # Prefer wallet clustering when addresses exist (capped sample for speed)
+    sample = (
+        db.query(Transaction)
+        .order_by(Transaction.amount_btc.desc())
+        .limit(6000)
+        .all()
+    )
     address_stats = defaultdict(lambda: {"volume": 0.0, "tx_count": 0, "ips": set(), "peers": set()})
     for tx in sample:
         addrs = set(deserialize_addresses(tx.input_addresses)) | set(deserialize_addresses(tx.output_addresses))
@@ -411,6 +439,7 @@ def generate_leads(db: Session, anomalies, clusters) -> list[InvestigativeLead]:
     leads = []
 
     usable = [a for a in anomalies if (a.amount_btc or 0) > MIN_AMOUNT_BTC]
+    usable = sorted(usable, key=lambda a: a.anomaly_score or 0, reverse=True)[:MAX_ANOMALY_LEADS]
     by_txid = {}
     ids = [a.txid for a in usable]
     for i in range(0, len(ids), 500):
@@ -470,15 +499,7 @@ def generate_leads(db: Session, anomalies, clusters) -> list[InvestigativeLead]:
         peak = max((m.total_volume_btc or 0) for m in group)
         related_tx = [m.address for m in group[:10]] if looks_like_txid else []
         related_wallets = [] if looks_like_txid else [m.address for m in group[:10]]
-        if not related_tx and related_wallets:
-            # Attach sample TXIDs so the alerts table is not blank for wallet clusters
-            want = set(related_wallets[:4])
-            for t in db.query(Transaction.txid, Transaction.input_addresses, Transaction.output_addresses).limit(4000):
-                addrs = set(deserialize_addresses(t.input_addresses)) | set(deserialize_addresses(t.output_addresses))
-                if want & addrs:
-                    related_tx.append(t.txid)
-                if len(related_tx) >= 3:
-                    break
+        # Skip full-table wallet→txid scan (too slow on 100k); TX cluster already has ids
         leads.append(InvestigativeLead(
             lead_id=f"L-{uuid.uuid4().hex[:6].upper()}",
             priority="HIGH" if vol > 5 or len(group) > 10 else "MEDIUM",
@@ -542,10 +563,22 @@ def run_full_analysis(db: Session) -> dict:
     anomalies = detect_anomalies(db)
     clusters = cluster_entities(db)
     leads = generate_leads(db, anomalies, clusters)
-    return {
+    result = {
         "anomalies": len(anomalies),
         "clusters": len({c.cluster_id for c in clusters if c.cluster_id >= 0}),
         "leads": len(leads),
         "model": "IsolationForest+MiniBatchKMeans",
         "model_saved": str(MODEL_PATH),
     }
+    # Archive alerts only: JSON file with datetime + optional PostgreSQL
+    try:
+        from backend.database.postgres_alerts import write_alerts_export
+        result["alert_export"] = write_alerts_export(leads, meta={
+            "model": result["model"],
+            "anomalies": result["anomalies"],
+            "clusters": result["clusters"],
+            "leads": result["leads"],
+        }, db=db)
+    except Exception as e:
+        result["alert_export"] = {"error": str(e)}
+    return result

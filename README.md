@@ -120,14 +120,38 @@ Optional (needs internet once): Upload page → **Download DB-IP Lite**. After t
 | GET | `/api/stats` | Dashboard statistics |
 | GET | `/api/transactions` | Ingested rows (incl. amounts lists, geo) |
 | POST | `/api/ingest` | Upload CSV/JSON/XML |
-| POST | `/api/analyze` | Correlation + ML |
-| GET | `/api/graph` | Link-analysis nodes/edges |
+| POST | `/api/analyze` | Correlation + ML; saves alerts file `alerts_YYYYMMDD_HHMMSS.csv` (+ Postgres optional) |
 | GET | `/api/alerts` | Ranked leads (paginated) |
+| GET | `/api/alerts/exports` | List saved alert snapshot files |
+| POST | `/api/alerts/archive` | Re-export current alerts with a new datetime filename |
+| GET | `/api/postgres/status` | Postgres alert-archive status |
 | GET | `/api/anomalies` | Isolation Forest hits |
 | GET | `/api/clusters` | Entity clusters |
 | GET | `/api/correlations` | Network–chain joins |
 | GET | `/api/geo/status` | CSV vs DB-IP MMDB |
 | POST | `/api/geo/download` | Fetch DB-IP Lite once |
+
+### Optional PostgreSQL (alerts archive only)
+
+Working DB stays **SQLite**. After each **Run Analysis**, alert leads are saved to:
+
+- `data/exports/alerts_YYYYMMDD_HHMMSS.csv` — one address & one amount per cell; multi-output txs span multiple rows
+- PostgreSQL tables `alert_runs` + `alerts` (if `POSTGRES_URL` is set)
+
+```bash
+# start Postgres
+docker compose up -d
+
+# configure
+cp .env.example .env
+# POSTGRES_URL=postgresql+psycopg://bitforensics:bitforensics@localhost:5432/bitforensics
+
+pip install -r requirements.txt
+python run.py
+```
+
+Then open **http://localhost:8000**, upload data, click **Run Analysis**. Check `data/exports/` and `GET /api/postgres/status`.
+
 
 ## Architecture
 
@@ -143,7 +167,8 @@ bitcoin/
 │   ├── geo/lookup.py           # Offline GeoIP
 │   ├── geo/download.py         # DB-IP Lite fetch
 │   ├── graph/builder.py        # IP / wallet / tx graph
-│   ├── database/db.py          # SQLite
+│   ├── database/db.py          # SQLite (working store)
+│   ├── database/postgres_alerts.py  # Alert archive → JSON + optional Postgres
 │   └── models/schemas.py
 ├── frontend/dist/              # Dashboard
 ├── data/samples/               # Demo files

@@ -7,3 +7,5 @@ ip_prefix,country,asn,org
 172.16,LOCAL,0,Private network
 10.0,LOCAL,0,Private network
 192.168,LOCAL,0,Private LAN
+77.67,NL,1136,KPN Netherlands
+81.2,GB,5089,Virgin Media UK

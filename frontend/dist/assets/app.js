@@ -128,13 +128,88 @@ function showTab(name) {
   document.querySelectorAll('.page').forEach(function (p) {
     p.classList.toggle('active', p.id === 'tab-' + name);
   });
+  document.body.classList.toggle('graph-mode', name === 'graph');
   $('page-title').textContent = pages[name][0];
   $('page-desc').textContent = pages[name][1];
-  if (name === 'graph') loadGraph();
+  if (name === 'graph') {
+    // Wait a frame so graph-mode layout has real width/height, then draw
+    requestAnimationFrame(function () {
+      loadGraph();
+    });
+  }
+}
+
+function waitForGraphStage(canvas) {
+  return new Promise(function (resolve) {
+    const parent = canvas && canvas.parentElement;
+    if (!parent) {
+      resolve();
+      return;
+    }
+    let frames = 0;
+    function ready() {
+      const r = parent.getBoundingClientRect();
+      return r.width > 80 && r.height > 80;
+    }
+    if (ready()) {
+      resolve();
+      return;
+    }
+    function tick() {
+      frames += 1;
+      if (ready() || frames > 45) resolve();
+      else requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  });
+}
+
+async function loadGraph() {
+  try {
+    const canvas = $('graph-canvas');
+    if (typeof Graph === 'undefined' || !window.Graph || !canvas) {
+      toast('Graph renderer not loaded — hard refresh the page (Cmd+Shift+R)');
+      return;
+    }
+    await waitForGraphStage(canvas);
+    const data = await api(API + '/graph');
+    if (!_graphStats) {
+      try { _graphStats = await api(API + '/stats'); } catch (e) { _graphStats = null; }
+    }
+    const meta = data.meta || {};
+    renderGraphRiskStats(meta);
+    renderGraphFooter(meta, _graphStats);
+    const note = $('graph-note');
+    if (note) {
+      note.hidden = true;
+      note.textContent = '';
+    }
+    const range = $('flt-range');
+    if (range && range.type !== 'hidden') {
+      const times = ((data.nodes || []).map(function (n) { return n.timestamp || n.first_seen || n.last_seen; }).filter(Boolean)).sort();
+      range.value = times.length ? (times[0].slice(0, 10) + ' — ' + times[times.length - 1].slice(0, 10)) : 'All dates';
+    }
+    _graphCtl = window.Graph.draw(canvas, data, {
+      onSelect: function (node) { renderGraphDetail(node); },
+      minimap: $('graph-minimap'),
+      filter: currentGraphFilter(),
+    });
+    if (_graphCtl && _graphCtl.getCountries) fillCountryFilter(_graphCtl.getCountries());
+    // Second pass after paint — guarantees full-size canvas + visible graph
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        if (_graphCtl && _graphCtl.relayout) _graphCtl.relayout();
+        else if (_graphCtl && _graphCtl.fit) _graphCtl.fit();
+      });
+    });
+  } catch (e) {
+    toast('Graph failed: ' + e.message);
+  }
 }
 
 async function loadStats() {
   const s = await api(API + '/stats');
+  _graphStats = s;
   const vol = Number(s.total_volume_btc || 0);
   const volText = vol >= 1000 ? vol.toLocaleString(undefined, { maximumFractionDigits: 2 }) : String(s.total_volume_btc);
   const fmt = function (n) { return Number(n || 0).toLocaleString(); };
@@ -152,21 +227,12 @@ async function loadStats() {
   }).join('');
 
   const hint = $('hint');
-  const parts = [];
-  if (s.sources && Object.keys(s.sources).length) {
-    const src = Object.keys(s.sources).map(function (name) {
-      return name + ': ' + fmt(s.sources[name]);
-    }).join(' · ');
-    parts.push('Loaded from ' + src + '. Same TXID in two files counts once (no row limit).');
-  }
   if (s.total_transactions > 0 && s.leads_generated === 0) {
-    parts.push('Data is loaded but not analyzed yet. Click "Run Analysis" to train the model and generate alerts.');
-  }
-  if (parts.length) {
     hint.style.display = 'block';
-    hint.textContent = parts.join(' ');
+    hint.textContent = 'Data is loaded but not analyzed yet. Click "Run Analysis" to train the model and generate alerts.';
   } else {
     hint.style.display = 'none';
+    hint.textContent = '';
   }
 }
 
@@ -396,12 +462,229 @@ async function loadClusters() {
   }).join('');
 }
 
-async function loadGraph() {
+let _graphCtl = null;
+let _graphStats = null;
+
+function fmtWhen(iso) {
+  if (!iso) return '—';
   try {
-    const data = await api(API + '/graph');
-    if (window.Graph && $('graph-canvas')) Graph.draw($('graph-canvas'), data);
+    return new Date(iso).toLocaleString();
   } catch (e) {
-    toast('Graph failed: ' + e.message);
+    return String(iso);
+  }
+}
+
+function riskLegendHtml() {
+  return '<div class="risk-legend">'
+    + '<span><i style="background:#ff4d4d"></i>High</span>'
+    + '<span><i style="background:#ff9f43"></i>Medium</span>'
+    + '<span><i style="background:#28c76f"></i>Low</span>'
+    + '<span><i style="background:#60a5fa"></i>Normal</span>'
+    + '</div>';
+}
+
+function metaRow(label, value) {
+  return '<div class="meta-row"><span class="meta-k">' + esc(label) + '</span><span class="meta-v">' + value + '</span></div>';
+}
+
+function relLabel(rel) {
+  if (rel === 'src' || rel === 'dst') return 'IP observed in TX';
+  if (rel === 'input') return 'Wallet input → TX';
+  if (rel === 'output') return 'TX → Wallet output';
+  return rel || 'linked';
+}
+
+function renderGraphDetail(node) {
+  const el = $('graph-detail');
+  if (!el) return;
+  if (!node) {
+    el.innerHTML = '<h4>Entity details</h4>'
+      + '<p class="empty">Click any IP, wallet, or TX icon on the graph. Neighbours appear here as clickable evidence chips.</p>'
+      + '<div class="ps-box">'
+      + '<strong>What this graph answers (PS)</strong>'
+      + '<ul>'
+      + '<li>Which <em>IPs</em> were observed with a transaction</li>'
+      + '<li>Which <em>wallets</em> funded or received that TX</li>'
+      + '<li>Why ML flagged an entity (confidence + reasons)</li>'
+      + '</ul></div>'
+      + riskLegendHtml();
+    return;
+  }
+  const iconClass = node.type === 'ip' ? 'gicon-ip' : node.type === 'wallet' ? 'gicon-wallet' : 'gicon-tx';
+  const iconSvg = node.type === 'ip'
+    ? '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18M12 3v18"/></svg>'
+    : node.type === 'wallet'
+      ? '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M16 12h5v3h-5a1.5 1.5 0 0 1 0-3z"/></svg>'
+      : '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M14 9l3 3-3 3"/></svg>';
+  const risk = Number(node.risk_score || 0);
+  const sev = (node.severity || (node.flagged ? 'HIGH' : 'NORMAL')).toUpperCase();
+  const badge = node.flagged
+    ? '<span class="pill ' + (sev === 'MEDIUM' ? 'MEDIUM' : sev === 'LOW' ? 'LOW' : 'HIGH') + '">'
+      + (sev === 'MEDIUM' ? 'MEDIUM RISK' : sev === 'LOW' ? 'LOW RISK' : 'HIGH RISK') + '</span>'
+    : '<span class="pill LOW">NORMAL</span>';
+  const fullId = node.address || node.txid || node.ip || node.label || node.id;
+  const typeName = node.type === 'ip' ? 'IP' : node.type === 'wallet' ? 'Wallet' : 'Transaction';
+
+  let html = '<div class="item-kicker">'
+    + '<button type="button" class="gicon ' + iconClass + ' gicon-btn" title="Selected entity">' + iconSvg + '</button>'
+    + badge
+    + '<span class="type-pill">' + esc(typeName) + '</span>'
+    + '</div>';
+  html += '<div class="item-title mono">' + esc(fullId) + copyBtn(fullId) + '</div>';
+  if (node.pattern_label) {
+    html += '<div class="pattern-box"><strong>' + esc(node.pattern_label) + '</strong>'
+      + '<p>' + esc(node.pattern_why || 'SIH typology from fan-in / fan-out / amount shape.') + '</p></div>';
+  }
+  html += '<p class="layer-tag">' + esc(node.layer_label || '') + '</p>';
+  html += '<div class="risk-row"><div class="risk-big">' + Math.round(risk) + '%</div>'
+    + '<div class="risk-bar"><span style="width:' + Math.min(100, Math.max(0, risk)) + '%"></span></div></div>';
+  html += '<p class="risk-caption">Confidence score from analysis</p>';
+
+  html += '<div class="meta-list">';
+  if (node.type === 'wallet') {
+    const countries = (node.top_countries || []).slice(0, 4).join(', ') || '—';
+    html += metaRow('First Seen', esc(fmtWhen(node.first_seen)));
+    html += metaRow('Last Seen', esc(fmtWhen(node.last_seen)));
+    html += metaRow('Total Received', esc(fmtBtc(node.total_received)) + ' BTC');
+    html += metaRow('Total Sent', esc(fmtBtc(node.total_sent)) + ' BTC');
+    html += metaRow('Connected IPs', String(node.connected_ips || 0));
+    html += metaRow('Connected TXs', String(node.connected_txs || 0));
+    html += metaRow('Top Countries', esc(countries));
+  } else if (node.type === 'tx') {
+    html += metaRow('Time', esc(fmtWhen(node.timestamp)));
+    html += metaRow('Amount', esc(fmtBtc(node.amount_btc)) + ' BTC');
+    html += metaRow('Fee', esc(fmtBtc(node.fee_btc)) + ' BTC');
+    html += metaRow('Script', esc(node.script_type || '—'));
+    html += metaRow('Geo / ASN', esc((node.geo_country || '—') + ' · ' + (node.asn || '—')));
+    html += metaRow('Src IP', esc(node.src_ip || '—'));
+    html += metaRow('Dst IP', esc(node.dst_ip || '—'));
+    html += metaRow('Connected Wallets', String(node.connected_wallets || 0));
+  } else {
+    html += metaRow('IP', '<span class="mono">' + esc(node.ip || node.label || '—') + '</span>');
+    html += metaRow('Country', esc(node.country || '—'));
+    html += metaRow('ASN', esc(node.asn || '—'));
+    html += metaRow('Role', esc(node.role === 'src' ? 'Source peer' : node.role === 'dst' ? 'Destination peer' : (node.role || '—')));
+    html += metaRow('Connected TXs', String(node.connected_txs || 0));
+    html += metaRow('Connected Wallets', String(node.connected_wallets || 0));
+  }
+  html += '</div>';
+
+  const neighbors = node.neighbors || [];
+  html += '<h4>Linked evidence <span class="soft-count">(' + neighbors.length + ') — click any</span></h4>';
+  if (neighbors.length) {
+    html += '<div class="nb-list">' + neighbors.map(function (nb) {
+      const cls = 'nb-chip nb-' + esc(nb.type) + (nb.flagged ? ' nb-flag' : '');
+      return '<button type="button" class="' + cls + '" data-node-id="' + esc(nb.id) + '" title="Open ' + esc(relLabel(nb.rel)) + '">'
+        + '<span class="nb-type">' + esc((nb.type || '').toUpperCase()) + '</span>'
+        + '<span class="nb-label">' + esc(nb.label || nb.id) + '</span>'
+        + (nb.flagged ? '<span class="nb-risk">' + Math.round(nb.risk_score || 0) + '%</span>' : '')
+        + '</button>';
+    }).join('') + '</div>';
+  } else {
+    html += '<p class="empty">No linked neighbours — click another node on the graph.</p>';
+  }
+
+  const why = node.why || [];
+  html += '<h4>Why this matters (SIH)</h4>';
+  if (why.length) {
+    html += '<ul class="why-list">' + why.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('') + '</ul>';
+  } else {
+    html += '<p class="empty">Select a flagged TX to see typology + model reasons.</p>';
+  }
+
+  const href = node.type === 'wallet' && node.address
+    ? btcAddrUrl(node.address)
+    : (node.type === 'tx' && node.txid ? btcTxUrl(node.txid) : '');
+  if (href) {
+    html += '<a class="btn btn-main invest-detail-btn" href="' + esc(href) + '" target="_blank" rel="noopener">View Full Details →</a>';
+  }
+  html += riskLegendHtml();
+  el.innerHTML = html;
+}
+
+function renderGraphRiskStats(meta) {
+  const el = $('graph-risk-stats');
+  if (!el) return;
+  const c = (meta && meta.counts) || {};
+  const r = (meta && meta.risk_counts) || {};
+  const total = (c.ip || 0) + (c.wallet || 0) + (c.tx || 0);
+    el.innerHTML =
+    '<span class="pill-stat high">High<strong>' + (r.high || 0) + '</strong></span>'
+    + '<span class="pill-stat med">Med<strong>' + (r.medium || 0) + '</strong></span>'
+    + '<span class="pill-stat low">Low<strong>' + (r.low || 0) + '</strong></span>'
+    + '<span class="pill-stat total">Total<strong>' + total + '</strong></span>';
+}
+
+function renderGraphFooter(meta, stats) {
+  const el = $('graph-footer');
+  if (!el) return;
+  const c = (meta && meta.counts) || {};
+  const fmt = function (n) { return Number(n || 0).toLocaleString(); };
+  el.innerHTML =
+    '<span class="ft-item"><span class="ft-ico" style="background:#4169e1"></span>Total Transactions <strong>' + fmt(stats && stats.total_transactions != null ? stats.total_transactions : c.tx) + '</strong></span>'
+    + '<span class="ft-item"><span class="ft-ico" style="background:#ff9f43"></span>Total Wallets <strong>' + fmt(c.wallet) + '</strong></span>'
+    + '<span class="ft-item"><span class="ft-ico" style="background:#28c76f"></span>Total IPs <strong>' + fmt(c.ip) + '</strong></span>'
+    + '<span class="ft-item"><span class="ft-ico" style="background:#ff4d4d"></span>Anomalies Detected <strong>' + fmt(stats && stats.anomalies_detected) + '</strong></span>'
+    + '<span class="ft-item"><span class="ft-ico" style="background:#9b59b6"></span>Clusters Identified <strong>' + fmt(stats && stats.clusters_found) + '</strong></span>';
+}
+
+function fillCountryFilter(countries) {
+  const sel = $('flt-country');
+  if (!sel) return;
+  const cur = sel.value || 'all';
+  sel.innerHTML = '<option value="all">All</option>'
+    + (countries || []).map(function (c) {
+      return '<option value="' + esc(c) + '">' + esc(c) + '</option>';
+    }).join('');
+  sel.value = cur;
+  if (sel.value !== cur) sel.value = 'all';
+}
+
+function currentGraphFilter() {
+  return {
+    risk: ($('flt-risk') && $('flt-risk').value) || 'all',
+    type: ($('flt-type') && $('flt-type').value) || 'all',
+    country: ($('flt-country') && $('flt-country').value) || 'all',
+  };
+}
+
+function applyGraphFilters() {
+  if (!_graphCtl || !_graphCtl.setFilter) return;
+  _graphCtl.setFilter(currentGraphFilter());
+  toast('Filters applied');
+}
+
+function selectGraphNode(id) {
+  if (!_graphCtl || !_graphCtl.selectById) return;
+  const n = _graphCtl.selectById(id);
+  if (!n) toast('Entity not in current graph view — try Show all / Load sample');
+}
+
+function filterGraphByType(type) {
+  const sel = $('flt-type');
+  if (sel) sel.value = type || 'all';
+  applyGraphFilters();
+}
+
+async function loadNetworkSample() {
+  const btn = $('btn-graph-sample');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Loading…';
+  }
+  try {
+    const res = await api(API + '/demo/network-sample', { method: 'POST' });
+    toast(res.message || 'Network sample ready');
+    await refresh();
+    showTab('graph');
+    await loadGraph();
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Sample';
+    }
   }
 }
 
@@ -433,7 +716,14 @@ async function runAnalysis() {
   }
   try {
     const res = await api(API + '/analyze', { method: 'POST' });
-    toast('Analysis done — ' + res.anomalies + ' anomalies, ' + res.leads + ' alerts');
+    var msg = 'Analysis done — ' + res.anomalies + ' anomalies, ' + res.leads + ' alerts';
+    if (res.alert_export && res.alert_export.filename) {
+      msg += ' · saved ' + res.alert_export.filename;
+      if (res.alert_export.postgres && res.alert_export.postgres.saved) {
+        msg += ' (+ Postgres)';
+      }
+    }
+    toast(msg);
     await refresh();
   } catch (e) {
     toast(e.message);
@@ -547,6 +837,28 @@ bind('btn-refresh', 'click', refresh);
 bind('btn-clear', 'click', clearData);
 bind('btn-clear-upload', 'click', clearData);
 bind('btn-geo', 'click', downloadGeo);
+bind('btn-graph-sample', 'click', loadNetworkSample);
+bind('btn-graph-refresh', 'click', loadGraph);
+bind('btn-graph-filter', 'click', applyGraphFilters);
+bind('btn-graph-alerts', 'click', function () { showTab('alerts'); });
+bind('btn-graph-back', 'click', function () { showTab('dashboard'); });
+bind('btn-graph-zoom-in', 'click', function () { if (_graphCtl && _graphCtl.zoom) _graphCtl.zoom(1.15); });
+bind('btn-graph-zoom-out', 'click', function () { if (_graphCtl && _graphCtl.zoom) _graphCtl.zoom(0.87); });
+bind('btn-graph-fit', 'click', function () { if (_graphCtl && _graphCtl.fit) _graphCtl.fit(); });
+
+document.body.addEventListener('click', function (e) {
+  const leg = e.target.closest('[data-filter-type]');
+  if (leg && $('tab-graph') && $('tab-graph').classList.contains('active')) {
+    e.preventDefault();
+    filterGraphByType(leg.getAttribute('data-filter-type'));
+    return;
+  }
+  const chip = e.target.closest('[data-node-id]');
+  if (chip) {
+    e.preventDefault();
+    selectGraphNode(chip.getAttribute('data-node-id'));
+  }
+});
 
 document.body.addEventListener('click', function (e) {
   const btn = e.target.closest('[data-copy]');

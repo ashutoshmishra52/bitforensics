@@ -1,0 +1,23 @@
+# PostgreSQL for archiving analysis alerts only (optional).
+# Working forensic DB remains SQLite at data/bitforensics.db
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: bitforensics-postgres
+    environment:
+      POSTGRES_USER: bitforensics
+      POSTGRES_PASSWORD: bitforensics
+      POSTGRES_DB: bitforensics
+    ports:
+      - "5432:5432"
+    volumes:
+      - bf_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bitforensics -d bitforensics"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  bf_pgdata:

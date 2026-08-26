@@ -64,7 +64,7 @@ def _get(row: dict, field: str):
         return None
     norm = {}
     for k, v in row.items():
-        nk = str(k).strip().lower().replace(" ", "_").replace("-", "_")
+        nk = str(k).strip().lower().replace(" ", "_").replace("-", "_").replace("[]", "")
         norm[nk] = v
     for name in ALIASES[field]:
         if name in norm and norm[name] not in (None, ""):

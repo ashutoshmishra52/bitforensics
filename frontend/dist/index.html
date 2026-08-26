@@ -4,7 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BitForensics</title>
-  <link rel="stylesheet" href="/assets/style.css?v=15">
+  <link rel="icon" type="image/png" href="/assets/icon.png">
+  <link rel="shortcut icon" type="image/png" href="/assets/icon.png">
+  <link rel="apple-touch-icon" href="/assets/icon.png">
+  <link rel="stylesheet" href="/assets/style.css?v=36">
 </head>
 <body>
   <div class="layout">
@@ -42,26 +45,99 @@
         <p id="hint" class="note" style="display:none"></p>
         <div class="box">
           <h3>All alerts</h3>
-          <p class="note tight">Full ranked list from the last analysis — if the model flagged 600, all 600 stay here. Click a row for evidence.</p>
           <div id="dash-alerts"></div>
         </div>
         <div class="box stack-box">
           <h3>Highest-risk transactions</h3>
-          <p class="note tight">Every Isolation Forest outlier from this dump, same order as analysis.</p>
           <div id="dash-anomalies"></div>
         </div>
       </section>
 
       <section id="tab-graph" class="page">
-        <div class="box">
-          <p class="note">Blue = IP, green = wallet, orange = transaction. Red border = flagged by the model.</p>
-          <div class="legend">
-            <span><i class="dot ip"></i> IP</span>
-            <span><i class="dot wallet"></i> Wallet</span>
-            <span><i class="dot tx"></i> Transaction</span>
-            <span><i class="dot flagged"></i> Flagged</span>
+        <div class="invest-shell">
+          <header class="invest-header">
+            <div class="invest-brand">
+              <div>
+                <h2 class="invest-title">Link Graph</h2>
+                <p class="invest-sub">IP · Transaction · Wallet relationships</p>
+              </div>
+            </div>
+            <div id="graph-risk-stats" class="invest-risks"></div>
+            <div class="graph-actions">
+              <button type="button" id="btn-graph-back" class="btn invest-ghost">Overview</button>
+              <button type="button" id="btn-graph-alerts" class="btn btn-main">Alerts</button>
+            </div>
+          </header>
+
+          <div class="invest-grid">
+            <aside class="invest-left">
+              <div class="invest-card">
+                <h4>Legend</h4>
+                <div class="leg-row">
+                  <button type="button" class="leg-chip" data-filter-type="ip" title="Filter IPs"><span class="gicon gicon-ip"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18M12 3v18"/></svg></span>IP</button>
+                  <button type="button" class="leg-chip" data-filter-type="wallet" title="Filter wallets"><span class="gicon gicon-wallet"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M16 12h5v3h-5a1.5 1.5 0 0 1 0-3z"/></svg></span>Wallet</button>
+                  <button type="button" class="leg-chip" data-filter-type="tx" title="Filter TXs"><span class="gicon gicon-tx"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M14 9l3 3-3 3"/></svg></span>TX</button>
+                  <button type="button" class="leg-chip" data-filter-type="all" title="Show all">All</button>
+                </div>
+                <div class="rel-row">
+                  <span><i class="edge-sample edge-ip"></i> IP→TX</span>
+                  <span><i class="edge-sample edge-in"></i> In</span>
+                  <span><i class="edge-sample edge-out"></i> Out</span>
+                </div>
+              </div>
+              <div class="invest-card">
+                <h4>Filters</h4>
+                <label class="invest-label">Risk
+                  <select id="flt-risk" class="invest-select">
+                    <option value="all">All</option>
+                    <option value="flagged">Flagged only</option>
+                    <option value="high">High / critical</option>
+                    <option value="normal">Normal</option>
+                  </select>
+                </label>
+                <label class="invest-label">Type
+                  <select id="flt-type" class="invest-select">
+                    <option value="all">All</option>
+                    <option value="ip">IP</option>
+                    <option value="wallet">Wallet</option>
+                    <option value="tx">Transaction</option>
+                  </select>
+                </label>
+                <label class="invest-label">Country
+                  <select id="flt-country" class="invest-select">
+                    <option value="all">All</option>
+                  </select>
+                </label>
+                <input type="hidden" id="flt-range" value="">
+                <button type="button" id="btn-graph-filter" class="btn btn-main invest-apply">Apply</button>
+                <div class="invest-tools">
+                  <button type="button" id="btn-graph-sample" class="btn invest-ghost">Sample</button>
+                  <button type="button" id="btn-graph-refresh" class="btn invest-ghost">Refresh</button>
+                </div>
+              </div>
+              <div class="invest-card invest-mini-wrap">
+                <div class="mini-head">
+                  <h4>Map</h4>
+                  <div class="mini-tools">
+                    <button type="button" id="btn-graph-zoom-in" class="mini-btn" title="Zoom in">+</button>
+                    <button type="button" id="btn-graph-zoom-out" class="mini-btn" title="Zoom out">−</button>
+                    <button type="button" id="btn-graph-fit" class="mini-btn" title="Fit">⛶</button>
+                  </div>
+                </div>
+                <canvas id="graph-minimap" class="graph-minimap" width="160" height="72"></canvas>
+              </div>
+            </aside>
+
+            <div class="invest-stage">
+              <canvas id="graph-canvas" width="1200" height="760" data-height="760"></canvas>
+            </div>
+
+            <aside class="invest-right" id="graph-detail">
+              <p class="empty">Select any IP, wallet, or transaction</p>
+            </aside>
           </div>
-          <canvas id="graph-canvas" width="900" height="500"></canvas>
+
+          <div id="graph-footer" class="invest-footer"></div>
         </div>
       </section>
 
@@ -95,7 +171,6 @@
       <section id="tab-upload" class="page">
         <div class="box upload-box">
           <h3>Upload dataset</h3>
-          <p class="note">Best demo file: <code>bitcoin_transactions_100k.csv</code> (amounts + fan-in/out). JSON 10k is a subset of the same txs. After upload, click <strong>Run Analysis</strong>.</p>
           <label class="drop" id="drop-zone">
             <input type="file" id="file-input" accept=".csv,.json,.xml" hidden>
             <span id="drop-label">Choose a file or drag it here</span>
@@ -122,7 +197,7 @@
   </div>
 
   <div id="toast" class="toast"></div>
-  <script src="/assets/graph.js?v=15"></script>
-  <script src="/assets/app.js?v=15"></script>
+  <script src="/assets/graph.js?v=36"></script>
+  <script src="/assets/app.js?v=36"></script>
 </body>
 </html>

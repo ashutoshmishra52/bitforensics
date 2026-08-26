@@ -125,3 +125,17 @@ def lookup(ip: str | None) -> tuple[str, str, str]:
     if not country:
         return "UNK", asn or "0", org or "Unknown"
     return country, asn or "0", org or ""
+
+
+def lookup_route(ip: str | None) -> tuple[str, str]:
+    """Country + ASN for export rows; prefix CSV fills gaps when MMDB returns LOCAL/UNK."""
+    if not ip:
+        return "", ""
+    country, asn, _ = lookup(ip)
+    if country in ("LOCAL", "UNK", ""):
+        c2, a2, _ = _from_csv(ip)
+        if c2:
+            country = c2
+            if not asn or asn == "0":
+                asn = a2
+    return country or "", asn or ""

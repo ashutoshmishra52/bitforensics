@@ -21,6 +21,7 @@ from backend.geo.download import download_geoip
 from backend.ml.analyzer import run_full_analysis
 from backend.ml.typology import classify_group, classify_tx, unique_title
 from backend.ml.red_flags import dataset_stats, explain_alert
+from backend.database.postgres_alerts import list_alert_exports, postgres_status, write_alerts_export
 from backend.models.schemas import AnomalyResult, ClusterMember, CorrelatedEvent, DashboardStats, InvestigativeLead
 
 app = FastAPI(title="BitForensics", version="1.0")
@@ -106,6 +107,55 @@ def transactions(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)
 @app.get("/api/graph")
 def graph(db: Session = Depends(get_db)):
     return build_graph(db)
+
+
+def _clear_all(db: Session) -> dict:
+    counts = {
+        "leads": db.query(Lead).count(),
+        "anomalies": db.query(Anomaly).count(),
+        "clusters": db.query(Cluster).count(),
+        "correlations": db.query(Correlation).count(),
+        "transactions": db.query(Transaction).count(),
+    }
+    for model in (Lead, Anomaly, Cluster, Correlation, Transaction):
+        db.query(model).delete()
+    db.commit()
+    return counts
+
+
+@app.post("/api/demo/network-sample")
+def load_network_sample(db: Session = Depends(get_db)):
+    """
+    Clear DB and load SIH investigation sample (IP + wallet + TX patterns:
+    Tor hop, mixer fan-out, peel-chain, whale, cross-border).
+    """
+    sample = SAMPLES / "transactions.csv"
+    network = SAMPLES / "network_events.json"
+    if not sample.exists():
+        raise HTTPException(404, "Sample file data/samples/transactions.csv not found")
+
+    cleared = _clear_all(db)
+    csv_result = store_transactions(db, parse_file(sample), sample.name)
+    net_result = {"parsed": 0, "added": 0}
+    if network.exists():
+        net_result = store_transactions(db, parse_file(network), network.name)
+    correlate_network_blockchain(db)
+    analysis = run_full_analysis(db)
+    return {
+        "message": "SIH sample loaded — Tor hop, mixer, peel-chain, whale patterns ready",
+        "cleared": cleared,
+        "ingest": csv_result,
+        "network_ingest": net_result,
+        "analysis": analysis,
+        "patterns": [
+            "Tor exit IP hop (DE)",
+            "Mixer / tumbler fan-out",
+            "Peel-chain layering",
+            "High-value whale transfer",
+            "Cross-border NL→GB",
+            "Network ↔ blockchain correlation",
+        ],
+    }
 
 
 def _alert_item(db, r, rank, stats):
@@ -337,19 +387,31 @@ def analyze(db: Session = Depends(get_db)):
     return {"message": "Done", **run_full_analysis(db)}
 
 
+@app.get("/api/alerts/exports")
+def alerts_exports(limit: int = 50):
+    """List saved alert snapshot files (alerts_YYYYMMDD_HHMMSS.csv)."""
+    return {"items": list_alert_exports(limit), "postgres": postgres_status()}
+
+
+@app.post("/api/alerts/archive")
+def alerts_archive_now(db: Session = Depends(get_db)):
+    """Re-save current SQLite leads to a new datetime-named file (+ Postgres if configured)."""
+    rows = db.query(Lead).order_by(Lead.score.desc()).all()
+    if not rows:
+        raise HTTPException(400, "No alerts yet — run analysis first")
+    info = write_alerts_export(rows, meta={"source": "manual_archive", "leads": len(rows)}, db=db)
+    return {"message": "Alerts archived", **info}
+
+
+@app.get("/api/postgres/status")
+def pg_status():
+    return postgres_status()
+
+
 @app.post("/api/reset")
 def reset(db: Session = Depends(get_db)):
     """Delete all transactions, alerts, clusters, anomalies, correlations."""
-    counts = {
-        "leads": db.query(Lead).count(),
-        "anomalies": db.query(Anomaly).count(),
-        "clusters": db.query(Cluster).count(),
-        "correlations": db.query(Correlation).count(),
-        "transactions": db.query(Transaction).count(),
-    }
-    for model in (Lead, Anomaly, Cluster, Correlation, Transaction):
-        db.query(model).delete()
-    db.commit()
+    counts = _clear_all(db)
     return {"message": "All data cleared", "deleted": counts}
 
 
@@ -423,6 +485,13 @@ def leads(db: Session = Depends(get_db)):
 
 if FRONTEND.exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND / "assets"), name="assets")
+
+    @app.get("/favicon.ico")
+    def favicon():
+        icon = FRONTEND / "assets" / "icon.png"
+        if icon.exists():
+            return FileResponse(icon, media_type="image/png")
+        raise HTTPException(404, "favicon not found")
 
     @app.get("/{path:path}")
     def ui(path: str):

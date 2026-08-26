@@ -26,11 +26,11 @@ def classify_tx(amount=0.0, fee=0.0, inn=0, out=0, hour=12) -> dict:
         code = "dusting"
     elif inn >= 8 and out <= 3:
         code = "consolidation"
-    elif out >= 12:
+    elif out >= 8:
         code = "mixer"
     elif inn >= 6 and out >= 6:
         code = "pass_through"
-    elif out >= 6 and amt >= 0.05:
+    elif out >= 5 and amt >= 0.05:
         code = "peel"
     elif amt >= 50:
         code = "whale"
