@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
@@ -21,7 +22,12 @@ from backend.geo.download import download_geoip
 from backend.ml.analyzer import run_full_analysis
 from backend.ml.typology import classify_group, classify_tx, unique_title
 from backend.ml.red_flags import dataset_stats, explain_alert
-from backend.database.postgres_alerts import list_alert_exports, postgres_status, write_alerts_export
+from backend.database.postgres_alerts import (
+    EXPORT_DIR,
+    list_alert_exports,
+    postgres_status,
+    write_alerts_export,
+)
 from backend.models.schemas import AnomalyResult, ClusterMember, CorrelatedEvent, DashboardStats, InvestigativeLead
 
 app = FastAPI(title="BitForensics", version="1.0")
@@ -35,22 +41,29 @@ SAMPLES = ROOT / "data" / "samples"
 @app.on_event("startup")
 def startup():
     init_db()
+    # Optional dev seed — off by default (upload your own data in production use)
+    if os.environ.get("BITFORENSICS_SEED_SAMPLES", "").strip().lower() not in ("1", "true", "yes"):
+        return
     from backend.database.db import SessionLocal
+
     db = SessionLocal()
     try:
-        if db.query(Transaction).count() == 0 and SAMPLES.exists():
-            for f in SAMPLES.iterdir():
-                if f.suffix.lower() in (".csv", ".json", ".xml"):
-                    store_transactions(db, parse_file(f), f.name)
-            correlate_network_blockchain(db)
-            run_full_analysis(db)
+        if db.query(Transaction).count() > 0:
+            return
+        if not SAMPLES.exists():
+            return
+        for f in sorted(SAMPLES.iterdir()):
+            if f.suffix.lower() in (".csv", ".json", ".xml"):
+                store_transactions(db, parse_file(f), f.name)
+        correlate_network_blockchain(db)
+        run_full_analysis(db)
     finally:
         db.close()
 
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "mode": "offline", "linux": True, "geo": geo_status()}
+    return {"status": "ok", "mode": "offline", "geo": geo_status()}
 
 
 @app.get("/api/stats", response_model=DashboardStats)
@@ -70,8 +83,6 @@ def stats(db: Session = Depends(get_db)):
         Transaction.source_file
     ).all()
 
-    # Graph size without building full graph
-    graph_nodes = min(total, 250) if anomalies == 0 else min(total, 250 + anomalies)
     return DashboardStats(
         total_transactions=total,
         total_network_events=network,
@@ -80,8 +91,8 @@ def stats(db: Session = Depends(get_db)):
         clusters_found=len(cluster_ids),
         leads_generated=leads,
         total_volume_btc=round(float(volume), 4),
-        graph_nodes=graph_nodes,
-        graph_edges=0 if anomalies == 0 else min(graph_nodes * 2, 800),
+        graph_nodes=0,
+        graph_edges=0,
         sources={name or "unknown": count for name, count in sources},
     )
 
@@ -106,6 +117,7 @@ def transactions(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)
 
 @app.get("/api/graph")
 def graph(db: Session = Depends(get_db)):
+    """Focused IP / TX / wallet neighborhood from real DB rows (not invented nodes)."""
     return build_graph(db)
 
 
@@ -123,16 +135,12 @@ def _clear_all(db: Session) -> dict:
     return counts
 
 
-@app.post("/api/demo/network-sample")
-def load_network_sample(db: Session = Depends(get_db)):
-    """
-    Clear DB and load SIH investigation sample (IP + wallet + TX patterns:
-    Tor hop, mixer fan-out, peel-chain, whale, cross-border).
-    """
+def _load_demo_dataset(db) -> dict:
+    """Replace DB contents with bundled demo CSV + network JSON, then analyze."""
     sample = SAMPLES / "transactions.csv"
     network = SAMPLES / "network_events.json"
     if not sample.exists():
-        raise HTTPException(404, "Sample file data/samples/transactions.csv not found")
+        raise HTTPException(404, "Demo data not found (data/samples/transactions.csv)")
 
     cleared = _clear_all(db)
     csv_result = store_transactions(db, parse_file(sample), sample.name)
@@ -142,20 +150,18 @@ def load_network_sample(db: Session = Depends(get_db)):
     correlate_network_blockchain(db)
     analysis = run_full_analysis(db)
     return {
-        "message": "SIH sample loaded — Tor hop, mixer, peel-chain, whale patterns ready",
+        "message": "Demo dataset loaded and analyzed",
         "cleared": cleared,
         "ingest": csv_result,
         "network_ingest": net_result,
         "analysis": analysis,
-        "patterns": [
-            "Tor exit IP hop (DE)",
-            "Mixer / tumbler fan-out",
-            "Peel-chain layering",
-            "High-value whale transfer",
-            "Cross-border NL→GB",
-            "Network ↔ blockchain correlation",
-        ],
     }
+
+
+@app.post("/api/samples/load")
+@app.post("/api/demo/network-sample")
+def load_network_sample(db: Session = Depends(get_db)):
+    return _load_demo_dataset(db)
 
 
 def _alert_item(db, r, rank, stats):
@@ -265,6 +271,15 @@ def _compact_alert(r, rank):
     if not txid and wallets and len(wallets[0]) >= 32 and all(c in "0123456789abcdef" for c in wallets[0][:32].lower()):
         txid = wallets[0]
         wallets = wallets[1:]
+    why = json.loads(r.evidence or "[]")
+    if not isinstance(why, list):
+        why = [str(why)] if why else []
+    why = [str(x).strip() for x in why if str(x).strip()][:5]
+    summary = (r.summary or "").strip()
+    # Short preview: first reason or first sentence of summary
+    preview = why[0] if why else (summary.split(".")[0] + "." if summary else "Pattern flagged by analysis.")
+    if len(preview) > 160:
+        preview = preview[:157] + "…"
     return {
         "id": r.lead_id,
         "rank": rank,
@@ -276,6 +291,9 @@ def _compact_alert(r, rank):
         "txid": txid,
         "tx_count": len(txids) or (1 if txid else 0),
         "wallet": wallets[0] if wallets else "",
+        "why": why,
+        "summary": summary,
+        "reason_preview": preview,
     }
 
 
@@ -388,9 +406,87 @@ def analyze(db: Session = Depends(get_db)):
 
 
 @app.get("/api/alerts/exports")
-def alerts_exports(limit: int = 50):
-    """List saved alert snapshot files (alerts_YYYYMMDD_HHMMSS.csv)."""
-    return {"items": list_alert_exports(limit), "postgres": postgres_status()}
+def alerts_exports(limit: int = 20):
+    """List saved alert snapshot files (newest first). Default last 20 datasheets."""
+    return {"items": list_alert_exports(min(max(limit, 1), 50)), "postgres": postgres_status()}
+
+
+def _alert_export_file(name: str) -> FileResponse:
+    """Resolve a saved alerts_* datasheet under data/exports/ for download."""
+    safe = Path(name).name
+    ok = safe.startswith("alerts_") and (
+        safe.endswith(".csv") or safe.endswith(".json") or safe.endswith(".pdf")
+    )
+    if not ok:
+        raise HTTPException(400, "Invalid export filename")
+    path = EXPORT_DIR / safe
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, "Export file not found")
+    if safe.endswith(".csv"):
+        media = "text/csv"
+    elif safe.endswith(".pdf"):
+        media = "application/pdf"
+    else:
+        media = "application/json"
+    return FileResponse(
+        path,
+        media_type=media,
+        filename=safe,
+        headers={"Content-Disposition": f'attachment; filename="{safe}"'},
+    )
+
+
+@app.get("/api/alerts/exports/download/{filename}")
+def download_alert_export(filename: str):
+    """Download one saved alerts_*.csv / alerts_*.json datasheet."""
+    return _alert_export_file(filename)
+
+
+@app.get("/api/alerts/exports/file")
+def download_alert_export_query(name: str):
+    """Same as path download; query form avoids SPA / encoding edge cases."""
+    return _alert_export_file(name)
+
+
+@app.get("/api/alerts/export.csv")
+def export_alerts_csv_now(db: Session = Depends(get_db)):
+    """
+    Build a CSV of current SQLite alerts for immediate browser download
+    (also archives a dated copy under data/exports/).
+    """
+    rows = db.query(Lead).order_by(Lead.score.desc()).all()
+    if not rows:
+        raise HTTPException(400, "No alerts yet — run analysis first")
+    info = write_alerts_export(rows, meta={"source": "frontend_export", "leads": len(rows)}, db=db)
+    path = EXPORT_DIR / info["filename"]
+    if not path.exists():
+        raise HTTPException(500, "Export failed to write file")
+    name = info["filename"]
+    return FileResponse(
+        path,
+        media_type="text/csv",
+        filename=name,
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+@app.get("/api/alerts/export.pdf")
+def export_alerts_pdf_now(db: Session = Depends(get_db)):
+    """Simple plain-language PDF of current alerts (also writes matching CSV)."""
+    rows = db.query(Lead).order_by(Lead.score.desc()).all()
+    if not rows:
+        raise HTTPException(400, "No alerts yet — run analysis first")
+    info = write_alerts_export(rows, meta={"source": "frontend_export_pdf", "leads": len(rows)}, db=db)
+    pdf_name = info.get("pdf_filename") or ""
+    path = EXPORT_DIR / pdf_name if pdf_name else None
+    if not path or not path.exists():
+        raise HTTPException(500, "PDF export failed to write file")
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=pdf_name,
+        headers={"Content-Disposition": f'attachment; filename="{pdf_name}"'},
+    )
 
 
 @app.post("/api/alerts/archive")

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from backend.geo.lookup import ASN_DB, COUNTRY_DB, GEO_DIR, reload_databases
 
-UA = "BitForensics/1.0 (SIH 2026 offline GeoIP fetch)"
+UA = "BitForensics/1.0 (offline GeoIP fetch)"
 
 
 def _months():

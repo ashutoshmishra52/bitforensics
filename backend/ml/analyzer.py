@@ -144,7 +144,7 @@ def detect_anomalies(db: Session) -> list[AnomalyResult]:
     scaler = StandardScaler()
     Xs = scaler.fit_transform(X)
 
-    # Fast defaults for laptop demo — still finds clear outliers
+    # Cap training size on large dumps for responsive analysis
     if n >= 50000:
         contamination = 0.05
         n_estimators = 60
@@ -227,38 +227,114 @@ def detect_anomalies(db: Session) -> list[AnomalyResult]:
 
 
 def _reasons(row, tx, score, anomaly_scores) -> list[str]:
+    """Real investigative reason paragraphs (pattern / scam-risk language, not proof)."""
     out = []
     amt = row["amount_btc"]
     fee = row["fee_btc"]
     if amt <= MIN_AMOUNT_BTC:
-        return ["Skipped — no transferable amount on record"]
+        return ["Skipped — no transferable amount on record."]
     med = float(np.median(anomaly_scores)) if len(anomaly_scores) else score
+    inn = int(row["input_count"] or 0)
+    outn = int(row["output_count"] or 0)
 
-    if row["amount_z"] > 2.5:
-        out.append(f"Amount {amt:.6f} BTC is much higher than typical transactions in this dataset")
-    elif amt > 1:
-        out.append(f"Large transfer: {amt:.6f} BTC")
+    # Pattern-first narrative
+    if outn >= 10 and amt > 0:
+        out.append(
+            f"Mixer / tumbler-style pattern: this transaction fans out to {outn} outputs "
+            f"({amt:.4f} BTC total). Scammers and launderers often split funds across many "
+            f"wallets to break the trail and cash out through separate hops."
+        )
+    elif outn >= 5 and amt >= 0.05:
+        out.append(
+            f"Peel-chain style layering: {outn} outputs from a {amt:.4f} BTC flow. "
+            f"Typical peel behaviour leaves successive leftovers while the main value moves "
+            f"forward — a common obfuscation pattern in ransomware and darknet cash-outs."
+        )
+    elif inn >= 8 and outn <= 3:
+        out.append(
+            f"Consolidation pattern: {inn} inputs collapse into {outn} output(s) "
+            f"({amt:.4f} BTC). This often marks pooling before an exchange deposit or "
+            f"a final cash-out step after earlier mixing."
+        )
+    elif inn >= 6 and outn >= 6:
+        out.append(
+            f"Pass-through hop: high fan-in ({inn}) and high fan-out ({outn}) together. "
+            f"Funds appear to enter and leave quickly — consistent with intermediary "
+            f"wallets used in multi-hop scam pipelines."
+        )
+    elif amt >= 50:
+        out.append(
+            f"Whale / high-value move: {amt:.4f} BTC is far above typical traffic in this dump. "
+            f"Large single transfers deserve review for ransomware payouts, OTC deals, "
+            f"or staged cash-outs."
+        )
+    elif amt > 0 and amt < 0.0005 and (inn >= 4 or outn >= 6):
+        out.append(
+            f"Dusting / probe pattern: tiny amount ({amt:.8f} BTC) with {inn} inputs / {outn} outputs. "
+            f"Dusting is used to tag wallets for tracking or to spam address clusters."
+        )
+
+    if row["amount_z"] > 2.5 and not any("Whale" in x or "high-value" in x for x in out):
+        out.append(
+            f"Amount {amt:.4f} BTC is statistically extreme versus this dataset "
+            f"(z-score {row['amount_z']:.1f}). Unusual size alone is a priority triage signal."
+        )
+    elif amt > 1 and not out:
+        out.append(f"Elevated transfer size: {amt:.4f} BTC relative to normal traffic in this dump.")
+
     if row["fee_ratio"] > 0.05:
-        out.append(f"Unusually high fee ratio ({row['fee_ratio']:.2%} of amount)")
+        out.append(
+            f"Urgent-fee behaviour: fee is {row['fee_ratio']:.2%} of the amount "
+            f"({fee:.6f} BTC). High fee pressure often means the actor wants confirmation "
+            f"fast — common in exit hops after a scam."
+        )
     elif fee > 0.001 and 0 < amt < 0.01:
-        out.append(f"Fee ({fee:.6f} BTC) is high relative to a small transfer")
-    if row["output_count"] >= 10 and amt > 0:
-        out.append(f"High fan-out: {int(row['output_count'])} outputs — mixing / peeling pattern")
-    if row["input_count"] >= 8 and amt > 0:
-        out.append(f"Many inputs ({int(row['input_count'])}) — consolidation pattern")
-    if row["io_ratio"] >= 5 and row["output_count"] >= 5 and amt > 0:
-        out.append("Outputs greatly exceed inputs — distribution pattern")
+        out.append(
+            f"Fee ({fee:.6f} BTC) is high relative to a small transfer ({amt:.6f} BTC), "
+            f"which can indicate priority routing of residual / probe funds."
+        )
+
     if row["is_p2sh"]:
-        out.append("Uses P2SH script type")
-    if getattr(tx, "timestamp", None) and tx.timestamp.hour < 5:
-        out.append(f"Occurred at {tx.timestamp.strftime('%H:%M')} UTC (overnight window)")
-    if row["has_ip"] == 0:
-        out.append("No network IP metadata on this record")
+        out.append(
+            "Uses P2SH scripting. Not criminal by itself, but often appears in multi-sig / "
+            "complex spend paths that investigators track alongside fan-out patterns."
+        )
+    if getattr(tx, "timestamp", None) and tx.timestamp.hour < 5 and amt >= 0.5:
+        out.append(
+            f"Off-hours burst at {tx.timestamp.strftime('%H:%M')} UTC with meaningful value. "
+            f"Overnight timing plus size is a classic layering / cash-out window."
+        )
     if row["foreign_geo"]:
-        out.append(f"Foreign network origin ({tx.geo_country}, ASN {tx.asn})")
+        out.append(
+            f"Cross-border network context: geo {tx.geo_country}, ASN {tx.asn}. "
+            f"When combined with mixing or peel shapes, foreign hops support a laundering narrative."
+        )
+    if row["has_ip"] == 0:
+        out.append(
+            "No src/dst IP on this record — blockchain-only view. Pattern still stands from "
+            "amount and input/output shape; network correlation cannot confirm the hop."
+        )
+    elif row["has_ip"] and (tx.src_ip or tx.dst_ip):
+        out.append(
+            f"Network link present ({tx.src_ip or '—'} → {tx.dst_ip or '—'}). "
+            f"IP ↔ TX correlation strengthens the case that this chain activity matches observed traffic."
+        )
+
     if score >= med:
-        out.append(f"Isolation Forest ranked this among top outliers (score {score:.3f})")
-    return out or ["Statistically unusual compared to the rest of the dataset"]
+        out.append(
+            f"Isolation Forest ranks this among the strongest outliers in the dump "
+            f"(model score {score:.3f}). The model reacts to the combined feature shape — "
+            f"not a single rule — which is why it is treated as a ranked investigative lead."
+        )
+
+    # Always return up to 5 crisp paragraphs
+    cleaned = [x.strip() for x in out if x and x.strip()]
+    if not cleaned:
+        cleaned = [
+            "Statistically unusual versus the rest of this dataset. "
+            "Treat as a triage lead and verify wallets, timing, and counterparties before escalating."
+        ]
+    return cleaned[:5]
 
 
 def _severity(score, amount, anomaly_scores) -> str:
@@ -511,11 +587,20 @@ def generate_leads(db: Session, anomalies, clusters) -> list[InvestigativeLead]:
                 f"peak {peak:.2f} BTC, combined {vol:.2f} BTC. {typ['why']}"
             ),
             evidence=[
-                f"Typology: {group[0].entity_type}",
-                f"Linked records: {len(group)}",
-                f"Peak amount: {peak:.4f} BTC",
-                f"Combined volume: {vol:.4f} BTC",
-                f"Shared IPs: {len(ips)}",
+                (
+                    f"{group[0].entity_type} pattern across {len(group)} linked records. "
+                    f"{typ.get('why') or 'Entities share similar volume and connectivity features.'}"
+                ),
+                f"Peak amount in the group is {peak:.4f} BTC; combined volume {vol:.4f} BTC.",
+                f"Shared network context: {len(ips)} distinct IP(s) across the cluster.",
+                (
+                    "MiniBatchKMeans placed these entities in the same behavioural bucket — "
+                    "review as a coordinated set, not isolated one-off payments."
+                ),
+                (
+                    "This is an investigative cluster lead (possible scam/laundering pipeline), "
+                    "not automatic proof of crime."
+                ),
             ],
             related_txids=related_tx,
             related_addresses=related_wallets,

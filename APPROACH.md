@@ -1,6 +1,6 @@
-# Technical Approach — BitForensics (SIH 2026, PS 26146)
+# Technical approach
 
-**Team write-up:** approach, model choice, and explainability. The system is a complete **offline Linux** prototype: ingest → correlate → ML → ranked leads → dashboard.
+Architecture and ML design notes for BitForensics. See [README.md](README.md) for install and usage.
 
 ## Problem (as stated)
 

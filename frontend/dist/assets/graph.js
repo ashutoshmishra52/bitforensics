@@ -223,10 +223,15 @@ const Graph = (() => {
       return c && c !== "LOCAL" && c !== "UNK" ? (n.label || "") + " · " + c : (n.label || "");
     }
     if (n.type === "tx") {
-      const amt = n.amount_btc != null ? Number(n.amount_btc).toFixed(2) + " BTC" : "";
-      return amt || (n.label || "TX").slice(0, 12);
+      // Prefer short txid so TX nodes are identifiable, not generic amount bubbles
+      const id = (n.txid || n.label || "TX").toString();
+      const short = id.length > 12 ? id.slice(0, 10) + "…" : id;
+      if (n.amount_btc != null && Number.isFinite(Number(n.amount_btc))) {
+        return short + " · " + Number(n.amount_btc).toFixed(2) + " BTC";
+      }
+      return short;
     }
-    const a = n.label || "";
+    const a = n.address || n.label || "";
     return a.length > 14 ? a.slice(0, 12) + "…" : a;
   }
 
@@ -455,7 +460,7 @@ const Graph = (() => {
       ctx.fillStyle = "#94a3b8";
       ctx.font = "13px sans-serif";
       ctx.textAlign = "left";
-      ctx.fillText("No graph nodes. Click “Load sample” for a full IP ↔ wallet ↔ TX network.", 18, 32);
+      ctx.fillText("No graph yet. Upload data and Run Analysis, or use Demo data.", 18, 32);
       paintMini(st);
       return;
     }

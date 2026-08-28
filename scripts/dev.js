@@ -283,7 +283,12 @@ function startServer(venvPy) {
   const child = spawn(venvPy, ["run.py"], {
     cwd: ROOT,
     stdio: "inherit",
-    env: { ...process.env, PORT: String(PORT) },
+    env: {
+      ...process.env,
+      PORT: String(PORT),
+      // Auto-reload so new API routes (exports download, etc.) pick up without restart
+      BITFORENSICS_RELOAD: process.env.BITFORENSICS_RELOAD || "1",
+    },
     windowsHide: true,
     shell: false,
   });

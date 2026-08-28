@@ -1,4 +1,4 @@
-"""Map on-chain shape to SIH-friendly scam / laundering typologies."""
+"""Map on-chain transaction shape to typology labels (mixer, peel, whale, etc.)."""
 from __future__ import annotations
 
 

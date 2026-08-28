@@ -3,7 +3,7 @@ const API = '/api';
 const pages = {
   dashboard: ['Overview', 'Bitcoin transaction monitoring'],
   graph: ['Link Graph', 'IP, wallet and transaction connections'],
-  alerts: ['Alerts', 'Full TXID, explorer links, and 120-condition explanations'],
+  alerts: ['Alerts', 'Ranked leads with reasons and export'],
   transactions: ['Transactions', 'All ingested records'],
   clusters: ['Clusters', 'Related wallets or similar transactions'],
   upload: ['Upload', 'Add a CSV, JSON, or XML file'],
@@ -214,10 +214,9 @@ async function loadStats() {
   const volText = vol >= 1000 ? vol.toLocaleString(undefined, { maximumFractionDigits: 2 }) : String(s.total_volume_btc);
   const fmt = function (n) { return Number(n || 0).toLocaleString(); };
   $('stats').innerHTML = [
-    ['Unique transactions', fmt(s.total_transactions)],
+    ['Transactions', fmt(s.total_transactions)],
     ['Network events', fmt(s.total_network_events)],
-    ['Graph nodes', fmt(s.graph_nodes)],
-    ['Graph edges', fmt(s.graph_edges)],
+    ['Correlated', fmt(s.correlated_events)],
     ['Anomalies', fmt(s.anomalies_detected)],
     ['Clusters', fmt(s.clusters_found)],
     ['Alerts', fmt(s.leads_generated)],
@@ -242,6 +241,7 @@ function alertRows(data) {
 }
 
 let _alertsReq = null;
+const _reasonCache = {};
 function fetchAllAlerts() {
   if (!_alertsReq) _alertsReq = api(API + '/alerts?compact=1');
   return _alertsReq;
@@ -263,21 +263,36 @@ function renderAlertTable(el, rows, total, expandable) {
       : (wallet
         ? '<a class="txid-link" href="' + esc(btcAddrUrl(wallet)) + '" target="_blank" rel="noopener">' + esc(cut(wallet, 16)) + '</a>'
         : '—');
+    const preview = a.reason_preview || (a.why && a.why[0]) || a.summary || 'Pattern flagged by analysis.';
+    const whyList = (a.why && a.why.length) ? a.why : [preview];
+    _reasonCache[a.id] = whyList;
     return '<tr class="alert-line" data-id="' + esc(a.id) + '">'
       + '<td class="num">' + a.rank + '</td>'
       + '<td>' + pill(a.priority) + '</td>'
       + '<td>' + esc(a.title || a.type || '-') + '</td>'
+      + '<td class="reason-cell">'
+      + '<div class="preview" title="' + esc(preview) + '">' + esc(preview) + '</div>'
+      + '<button type="button" class="btn-reason" data-reason-id="' + esc(a.id) + '" data-reason-title="'
+      + esc(a.title || 'Alert') + '">Reason</button>'
+      + '</td>'
       + '<td class="num">' + (a.confidence != null ? a.confidence : '-') + '%</td>'
-      + '<td class="num">' + (a.score != null ? a.score : '-') + '</td>'
       + '<td class="mono">' + linkCell + '</td>'
-      + '<td class="num">' + (a.tx_count > 1 ? a.tx_count + ' txs' : (wallet && !tx ? 'wallet' : '')) + '</td>'
       + '</tr>';
   }).join('');
   el.innerHTML = head
     + '<div class="table-box tight">'
     + '<table class="alert-table">'
-    + '<thead><tr><th>#</th><th>Priority</th><th>Alert</th><th>Conf</th><th>Score</th><th>TXID</th><th></th></tr></thead>'
+    + '<thead><tr><th>#</th><th>Priority</th><th>Alert</th><th>Why flagged</th><th>Conf</th><th>TXID</th></tr></thead>'
     + '<tbody>' + body + '</tbody></table></div>';
+
+  el.querySelectorAll('.btn-reason').forEach(function (btn) {
+    btn.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      openReasonModal(btn);
+    });
+  });
+
   if (!expandable) return;
   el.querySelectorAll('tr.alert-line').forEach(function (tr) {
     tr.addEventListener('click', function (e) {
@@ -285,6 +300,171 @@ function renderAlertTable(el, rows, total, expandable) {
       toggleAlertDetail(tr);
     });
   });
+}
+
+function openModal(title, bodyHtml, footHtml) {
+  const modal = $('modal');
+  if (!modal) return;
+  $('modal-title').textContent = title || 'Details';
+  $('modal-body').innerHTML = bodyHtml || '';
+  $('modal-foot').innerHTML = footHtml || '';
+  modal.hidden = false;
+}
+
+function closeModal() {
+  const modal = $('modal');
+  if (modal) modal.hidden = true;
+}
+
+function openReasonModal(btn) {
+  const id = btn.getAttribute('data-reason-id') || '';
+  const title = btn.getAttribute('data-reason-title') || 'Alert reason';
+  const cached = _reasonCache[id] || [];
+
+  function paint(paras) {
+    const list = (paras && paras.length) ? paras : ['No detailed reason stored for this alert. Re-run analysis to refresh evidence.'];
+    openModal(
+      'Why this alert — ' + title,
+      list.map(function (p) {
+        return '<p class="reason-para">' + esc(p) + '</p>';
+      }).join('')
+        + '<p class="flag-note" style="margin-top:14px;font-size:12px;color:#667085">'
+        + 'For investigation only — not proof of a crime.'
+        + '</p>',
+      '<button type="button" class="btn" data-close="1">Close</button>'
+    );
+  }
+
+  paint(cached);
+  if (!id) return;
+  api(API + '/alert-detail?id=' + encodeURIComponent(id)).then(function (a) {
+    const paras = [];
+    if (a.typology_label || a.summary) {
+      paras.push(
+        (a.typology_label ? ('Detected pattern: ' + a.typology_label + '. ') : '')
+        + (a.summary || '')
+      );
+    }
+    (a.why || []).forEach(function (w) {
+      if (w && paras.indexOf(w) < 0) paras.push(w);
+    });
+    if (a.red_flags && a.red_flags.categories) {
+      a.red_flags.categories.slice(0, 3).forEach(function (c) {
+        (c.flags || []).slice(0, 2).forEach(function (f) {
+          const line = (f.condition || '') + (f.why ? (' — ' + f.why) : '');
+          if (line && paras.indexOf(line) < 0) paras.push(line);
+        });
+      });
+    }
+    const final = paras.slice(0, 8);
+    if (final.length) _reasonCache[id] = final;
+    paint(final.length ? final : cached);
+  }).catch(function () { /* keep compact reasons */ });
+}
+
+async function downloadExportBlob(url, fallbackName) {
+  const res = await fetch(url);
+  if (!res.ok) {
+    let msg = 'Download failed (' + res.status + ')';
+    try {
+      const j = await res.json();
+      if (j && j.detail) msg = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail);
+    } catch (_) { /* ignore */ }
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  let name = fallbackName || 'alerts_export.csv';
+  const cd = res.headers.get('Content-Disposition') || '';
+  const m = /filename="?([^";]+)"?/i.exec(cd);
+  if (m) name = m[1].trim();
+  const a = document.createElement('a');
+  const href = URL.createObjectURL(blob);
+  a.href = href;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(function () { URL.revokeObjectURL(href); }, 1500);
+}
+
+async function openExportModal() {
+  openModal('Export alerts', '<p class="export-meta">Loading datasheets…</p>', '');
+  try {
+    const data = await api(API + '/alerts/exports?limit=20');
+    const items = data.items || [];
+    let html = '<p class="export-meta"><strong>CSV</strong> = full technical table (with reason). '
+      + '<strong>PDF</strong> = simple cards a normal person can read. Both are generated together.</p>';
+    if (!items.length) {
+      html += '<p class="export-empty">No saved datasheets yet. Click CSV or PDF after Run Analysis.</p>';
+    } else {
+      html += '<table class="export-list"><thead><tr>'
+        + '<th>#</th><th>Datasheet</th><th>Alerts</th><th>Rows</th><th>Created</th><th></th>'
+        + '</tr></thead><tbody>';
+      items.forEach(function (f, i) {
+        const when = f.created_at ? new Date(f.created_at).toLocaleString() : '—';
+        const fname = f.filename || '';
+        const pdfName = f.pdf_filename || (fname.replace(/\.csv$/i, '.pdf'));
+        html += '<tr>'
+          + '<td class="num">' + (i + 1) + '</td>'
+          + '<td class="mono">' + esc(fname) + '</td>'
+          + '<td class="num">' + (f.alert_count != null ? f.alert_count : '—') + '</td>'
+          + '<td class="num">' + (f.row_count != null ? f.row_count : '—') + '</td>'
+          + '<td>' + esc(when) + '</td>'
+          + '<td class="export-actions">'
+          + '<button type="button" class="ext-link btn-export-dl" data-file="'
+          + esc(fname) + '">CSV</button>'
+          + (f.pdf_filename
+            ? ' · <button type="button" class="ext-link btn-export-dl" data-file="'
+              + esc(pdfName) + '">PDF</button>'
+            : '')
+          + '</td>'
+          + '</tr>';
+      });
+      html += '</tbody></table>';
+    }
+    openModal(
+      'Export alerts',
+      html,
+      '<button type="button" class="btn" data-close="1">Close</button>'
+      + '<button type="button" class="btn" id="btn-dl-current-csv">Download CSV</button>'
+      + '<button type="button" class="btn btn-main" id="btn-dl-current-pdf">Download PDF</button>'
+    );
+    document.querySelectorAll('.btn-export-dl').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const fname = btn.getAttribute('data-file') || '';
+        if (!fname) return;
+        const url = API + '/alerts/exports/file?name=' + encodeURIComponent(fname);
+        downloadExportBlob(url, fname)
+          .then(function () { toast('Downloaded ' + fname); })
+          .catch(function (err) { toast(err.message || 'Download failed'); });
+      });
+    });
+    const dl = $('btn-dl-current-csv');
+    if (dl) {
+      dl.addEventListener('click', function () {
+        downloadExportBlob(API + '/alerts/export.csv', 'alerts_export.csv')
+          .then(function () { toast('CSV export ready'); })
+          .catch(function (err) { toast(err.message || 'Export failed'); });
+      });
+    }
+    const dlp = $('btn-dl-current-pdf');
+    if (dlp) {
+      dlp.addEventListener('click', function () {
+        downloadExportBlob(API + '/alerts/export.pdf', 'alerts_export.pdf')
+          .then(function () {
+            toast('PDF export ready');
+            setTimeout(function () { closeModal(); }, 400);
+          })
+          .catch(function (err) { toast(err.message || 'PDF export failed'); });
+      });
+    }
+  } catch (e) {
+    openModal(
+      'Export alerts',
+      '<p class="empty err-inline">' + esc(e.message) + '</p>',
+      '<button type="button" class="btn" data-close="1">Close</button>'
+    );
+  }
 }
 
 async function toggleAlertDetail(tr) {
@@ -304,7 +484,7 @@ async function toggleAlertDetail(tr) {
   tr.classList.add('is-open');
   const hold = document.createElement('tr');
   hold.className = 'alert-detail';
-  hold.innerHTML = '<td colspan="7"><div class="alert-expand"><p class="empty">Loading evidence…</p></div></td>';
+  hold.innerHTML = '<td colspan="6"><div class="alert-expand"><p class="empty">Loading evidence…</p></div></td>';
   tr.parentNode.insertBefore(hold, tr.nextSibling);
   try {
     const a = await api(API + '/alert-detail?id=' + encodeURIComponent(id));
@@ -345,7 +525,7 @@ async function loadDashAnomalies() {
 
 function redFlagPanel(rf) {
   if (!rf) {
-    return '<aside class="flag-panel"><p class="empty">No 120-condition match yet.</p></aside>';
+    return '<aside class="flag-panel"><p class="empty">No matching rules for this alert yet.</p></aside>';
   }
   let html = '<aside class="flag-panel">'
     + '<h4>Why this looks suspicious</h4>'
@@ -531,41 +711,60 @@ function renderGraphDetail(node) {
     + '<span class="type-pill">' + esc(typeName) + '</span>'
     + '</div>';
   html += '<div class="item-title mono">' + esc(fullId) + copyBtn(fullId) + '</div>';
-  if (node.pattern_label) {
+  // Typology only on TX — IP/wallet must not show borrowed "Mixer" labels
+  if (node.type === 'tx' && node.pattern_label) {
     html += '<div class="pattern-box"><strong>' + esc(node.pattern_label) + '</strong>'
-      + '<p>' + esc(node.pattern_why || 'SIH typology from fan-in / fan-out / amount shape.') + '</p></div>';
+      + '<p>' + esc(node.pattern_why || 'Typology from this TX fan-in / fan-out / amount shape.') + '</p></div>';
   }
   html += '<p class="layer-tag">' + esc(node.layer_label || '') + '</p>';
   html += '<div class="risk-row"><div class="risk-big">' + Math.round(risk) + '%</div>'
     + '<div class="risk-bar"><span style="width:' + Math.min(100, Math.max(0, risk)) + '%"></span></div></div>';
-  html += '<p class="risk-caption">Confidence score from analysis</p>';
+  html += '<p class="risk-caption">'
+    + (node.type === 'tx'
+      ? 'Model confidence for this transaction'
+      : 'Inherited link score (not this entity’s own anomaly)')
+    + '</p>';
 
   html += '<div class="meta-list">';
   if (node.type === 'wallet') {
     const countries = (node.top_countries || []).slice(0, 4).join(', ') || '—';
+    html += metaRow('Address', '<span class="mono">' + esc(node.address || fullId) + '</span>');
     html += metaRow('First Seen', esc(fmtWhen(node.first_seen)));
     html += metaRow('Last Seen', esc(fmtWhen(node.last_seen)));
-    html += metaRow('Total Received', esc(fmtBtc(node.total_received)) + ' BTC');
-    html += metaRow('Total Sent', esc(fmtBtc(node.total_sent)) + ' BTC');
-    html += metaRow('Connected IPs', String(node.connected_ips || 0));
-    html += metaRow('Connected TXs', String(node.connected_txs || 0));
+    html += metaRow('Received (on graph)', esc(fmtBtc(node.total_received)) + ' BTC');
+    html += metaRow('Sent (on graph)', esc(fmtBtc(node.total_sent)) + ' BTC');
+    html += metaRow('Linked TXs', String(node.connected_txs || 0));
+    html += metaRow('Linked IPs', String(node.connected_ips || 0));
     html += metaRow('Top Countries', esc(countries));
   } else if (node.type === 'tx') {
+    html += metaRow('TXID', '<span class="mono">' + esc(node.txid || fullId) + '</span>');
     html += metaRow('Time', esc(fmtWhen(node.timestamp)));
     html += metaRow('Amount', esc(fmtBtc(node.amount_btc)) + ' BTC');
     html += metaRow('Fee', esc(fmtBtc(node.fee_btc)) + ' BTC');
     html += metaRow('Script', esc(node.script_type || '—'));
-    html += metaRow('Geo / ASN', esc((node.geo_country || '—') + ' · ' + (node.asn || '—')));
+    html += metaRow('Inputs → Outputs', String(node.input_count || 0) + ' → ' + String(node.output_count || 0));
+    if (node.inputs_total != null) {
+      html += metaRow('Inputs on graph', String(node.inputs_shown) + ' of ' + String(node.inputs_total));
+    }
+    if (node.outputs_total != null) {
+      html += metaRow('Outputs on graph', String(node.outputs_shown) + ' of ' + String(node.outputs_total));
+    }
     html += metaRow('Src IP', esc(node.src_ip || '—'));
     html += metaRow('Dst IP', esc(node.dst_ip || '—'));
-    html += metaRow('Connected Wallets', String(node.connected_wallets || 0));
+    html += metaRow('Linked Wallets', String(node.connected_wallets || 0));
+    html += metaRow('Linked IPs', String(node.connected_ips || 0));
   } else {
     html += metaRow('IP', '<span class="mono">' + esc(node.ip || node.label || '—') + '</span>');
     html += metaRow('Country', esc(node.country || '—'));
     html += metaRow('ASN', esc(node.asn || '—'));
-    html += metaRow('Role', esc(node.role === 'src' ? 'Source peer' : node.role === 'dst' ? 'Destination peer' : (node.role || '—')));
-    html += metaRow('Connected TXs', String(node.connected_txs || 0));
-    html += metaRow('Connected Wallets', String(node.connected_wallets || 0));
+    html += metaRow('Role', esc(
+      node.role === 'src' ? 'Source peer'
+        : node.role === 'dst' ? 'Destination peer'
+          : node.role === 'both' ? 'Source + destination'
+            : (node.role || '—')
+    ));
+    html += metaRow('Linked TXs', String(node.connected_txs || 0));
+    html += metaRow('Linked Wallets', String(node.connected_wallets || 0));
   }
   html += '</div>';
 
@@ -585,7 +784,7 @@ function renderGraphDetail(node) {
   }
 
   const why = node.why || [];
-  html += '<h4>Why this matters (SIH)</h4>';
+  html += '<h4>Why this matters</h4>';
   if (why.length) {
     html += '<ul class="why-list">' + why.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('') + '</ul>';
   } else {
@@ -620,12 +819,14 @@ function renderGraphFooter(meta, stats) {
   if (!el) return;
   const c = (meta && meta.counts) || {};
   const fmt = function (n) { return Number(n || 0).toLocaleString(); };
+  // Footer shows what is ON the graph (not whole DB) so IP/TX/wallet stay honest
   el.innerHTML =
-    '<span class="ft-item"><span class="ft-ico" style="background:#4169e1"></span>Total Transactions <strong>' + fmt(stats && stats.total_transactions != null ? stats.total_transactions : c.tx) + '</strong></span>'
-    + '<span class="ft-item"><span class="ft-ico" style="background:#ff9f43"></span>Total Wallets <strong>' + fmt(c.wallet) + '</strong></span>'
-    + '<span class="ft-item"><span class="ft-ico" style="background:#28c76f"></span>Total IPs <strong>' + fmt(c.ip) + '</strong></span>'
-    + '<span class="ft-item"><span class="ft-ico" style="background:#ff4d4d"></span>Anomalies Detected <strong>' + fmt(stats && stats.anomalies_detected) + '</strong></span>'
-    + '<span class="ft-item"><span class="ft-ico" style="background:#9b59b6"></span>Clusters Identified <strong>' + fmt(stats && stats.clusters_found) + '</strong></span>';
+    '<span class="ft-item"><span class="ft-ico" style="background:#4169e1"></span>On graph · TX <strong>' + fmt(c.tx) + '</strong></span>'
+    + '<span class="ft-item"><span class="ft-ico" style="background:#ff9f43"></span>Wallets <strong>' + fmt(c.wallet) + '</strong></span>'
+    + '<span class="ft-item"><span class="ft-ico" style="background:#28c76f"></span>IPs <strong>' + fmt(c.ip) + '</strong></span>'
+    + '<span class="ft-item"><span class="ft-ico" style="background:#ff4d4d"></span>DB anomalies <strong>' + fmt(stats && stats.anomalies_detected) + '</strong></span>'
+    + '<span class="ft-item"><span class="ft-ico" style="background:#9b59b6"></span>DB clusters <strong>' + fmt(stats && stats.clusters_found) + '</strong></span>'
+    + '<span class="ft-item"><span class="ft-ico" style="background:#64748b"></span>DB txs <strong>' + fmt(stats && stats.total_transactions) + '</strong></span>';
 }
 
 function fillCountryFilter(countries) {
@@ -657,7 +858,7 @@ function applyGraphFilters() {
 function selectGraphNode(id) {
   if (!_graphCtl || !_graphCtl.selectById) return;
   const n = _graphCtl.selectById(id);
-  if (!n) toast('Entity not in current graph view — try Show all / Load sample');
+  if (!n) toast('Not in current graph view — click Refresh or load demo data');
 }
 
 function filterGraphByType(type) {
@@ -673,8 +874,8 @@ async function loadNetworkSample() {
     btn.textContent = 'Loading…';
   }
   try {
-    const res = await api(API + '/demo/network-sample', { method: 'POST' });
-    toast(res.message || 'Network sample ready');
+    const res = await api(API + '/samples/load', { method: 'POST' });
+    toast(res.message || 'Demo data ready');
     await refresh();
     showTab('graph');
     await loadGraph();
@@ -683,13 +884,14 @@ async function loadNetworkSample() {
   } finally {
     if (btn) {
       btn.disabled = false;
-      btn.textContent = 'Sample';
+      btn.textContent = 'Demo data';
     }
   }
 }
 
 async function refresh() {
   _alertsReq = null;
+  Object.keys(_reasonCache).forEach(function (k) { delete _reasonCache[k]; });
   try {
     await Promise.all([
       loadStats(),
@@ -777,7 +979,7 @@ async function loadGeoStatus() {
     if (el) {
       el.textContent = 'Engine: ' + engine + ' · country DB ' + (g.country_db ? 'yes' : 'no') + ' · ASN DB ' + (g.asn_db ? 'yes' : 'no') + ' · ' + (g.source || '');
     }
-    if (side) side.textContent = 'Offline · Linux · Geo ' + (g.engine === 'db-ip-mmdb' ? 'MMDB' : 'CSV');
+    if (side) side.textContent = 'Offline · Geo ' + (g.engine === 'db-ip-mmdb' ? 'MMDB' : 'CSV');
   } catch (e) {
     if (el) el.textContent = 'GeoIP status unavailable';
   }
@@ -837,6 +1039,20 @@ bind('btn-refresh', 'click', refresh);
 bind('btn-clear', 'click', clearData);
 bind('btn-clear-upload', 'click', clearData);
 bind('btn-geo', 'click', downloadGeo);
+bind('btn-export-alerts', 'click', openExportModal);
+bind('btn-export-alerts-dash', 'click', openExportModal);
+bind('btn-export-alerts-tab', 'click', openExportModal);
+
+(function bindModal() {
+  const modal = $('modal');
+  if (!modal) return;
+  modal.addEventListener('click', function (e) {
+    if (e.target && e.target.getAttribute('data-close')) closeModal();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && modal && !modal.hidden) closeModal();
+  });
+})();
 bind('btn-graph-sample', 'click', loadNetworkSample);
 bind('btn-graph-refresh', 'click', loadGraph);
 bind('btn-graph-filter', 'click', applyGraphFilters);

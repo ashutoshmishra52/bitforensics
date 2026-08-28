@@ -7,14 +7,14 @@
   <link rel="icon" type="image/png" href="/assets/icon.png">
   <link rel="shortcut icon" type="image/png" href="/assets/icon.png">
   <link rel="apple-touch-icon" href="/assets/icon.png">
-  <link rel="stylesheet" href="/assets/style.css?v=36">
+  <link rel="stylesheet" href="/assets/style.css?v=42">
 </head>
 <body>
   <div class="layout">
     <aside class="sidebar">
       <div class="logo">
         <strong>BitForensics</strong>
-        <span>NTRO · SIH 2026 · PS 26146</span>
+        <span>Bitcoin traffic analysis</span>
       </div>
       <nav id="main-nav">
         <button type="button" class="nav active" data-tab="dashboard">Overview</button>
@@ -24,7 +24,7 @@
         <button type="button" class="nav" data-tab="clusters">Clusters</button>
         <button type="button" class="nav" data-tab="upload">Upload</button>
       </nav>
-      <p class="status" id="sidebar-status">Offline · Linux ready</p>
+      <p class="status" id="sidebar-status">Ready</p>
     </aside>
 
     <main>
@@ -34,6 +34,7 @@
           <p id="page-desc">Bitcoin transaction monitoring</p>
         </div>
         <div class="actions">
+          <button type="button" id="btn-export-alerts" class="btn">Export</button>
           <button type="button" id="btn-run" class="btn btn-main">Run Analysis</button>
           <button type="button" id="btn-refresh" class="btn">Refresh</button>
           <button type="button" id="btn-clear" class="btn btn-danger">Clear Data</button>
@@ -44,7 +45,10 @@
         <div id="stats" class="stats"></div>
         <p id="hint" class="note" style="display:none"></p>
         <div class="box">
-          <h3>All alerts</h3>
+          <div class="box-head">
+            <h3>All alerts</h3>
+            <button type="button" id="btn-export-alerts-dash" class="btn btn-sm">Export</button>
+          </div>
           <div id="dash-alerts"></div>
         </div>
         <div class="box stack-box">
@@ -111,7 +115,7 @@
                 <input type="hidden" id="flt-range" value="">
                 <button type="button" id="btn-graph-filter" class="btn btn-main invest-apply">Apply</button>
                 <div class="invest-tools">
-                  <button type="button" id="btn-graph-sample" class="btn invest-ghost">Sample</button>
+                  <button type="button" id="btn-graph-sample" class="btn invest-ghost">Demo data</button>
                   <button type="button" id="btn-graph-refresh" class="btn invest-ghost">Refresh</button>
                 </div>
               </div>
@@ -142,7 +146,10 @@
       </section>
 
       <section id="tab-alerts" class="page">
-        <p class="note">Complete alert list (aligned table). Click a row for TX evidence and 120-condition flags — not proof of a crime.</p>
+        <div class="box-head">
+          <p class="note tight">Ranked leads — click Reason for details. Export as CSV (full data) or PDF (simple summary).</p>
+          <button type="button" id="btn-export-alerts-tab" class="btn btn-sm">Export</button>
+        </div>
         <div id="alert-list"></div>
       </section>
 
@@ -197,7 +204,20 @@
   </div>
 
   <div id="toast" class="toast"></div>
-  <script src="/assets/graph.js?v=36"></script>
-  <script src="/assets/app.js?v=36"></script>
+
+  <div id="modal" class="modal" hidden>
+    <div class="modal-backdrop" data-close="1"></div>
+    <div class="modal-card" role="dialog" aria-modal="true">
+      <header class="modal-head">
+        <h3 id="modal-title">Details</h3>
+        <button type="button" class="modal-x" data-close="1" aria-label="Close">×</button>
+      </header>
+      <div id="modal-body" class="modal-body"></div>
+      <footer class="modal-foot" id="modal-foot"></footer>
+    </div>
+  </div>
+
+  <script src="/assets/graph.js?v=42"></script>
+  <script src="/assets/app.js?v=42"></script>
 </body>
 </html>
